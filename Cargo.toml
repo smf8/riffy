@@ -1,0 +1,49 @@
+[package]
+name = "riffy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP framework
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.5", features = ["trace", "timeout"] }
+
+# HTTP client (upstream proxy)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+bytes = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Configuration
+figment = { version = "0.10", features = ["env", "yaml"] }
+humantime-serde = "1"
+
+# Redis
+redis = { version = "0.27", features = ["tokio-comp"] }
+
+# Concurrency
+dashmap = "6"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["chrono", "json", "env-filter"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# Allocator
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.6", optional = true }
+
+[features]
+default = ["jemalloc"]
+jemalloc = ["tikv-jemallocator"]

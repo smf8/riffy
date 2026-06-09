@@ -1,0 +1,39 @@
+riffy:
+  service-name: "my-service"
+
+proxy:
+  port: 8880
+  allow-http-side-effects: false
+
+upstream:
+  primary: "localhost:9100"
+  secondary: "localhost:9200"
+  candidate: "localhost:9000"
+  protocol: http
+  timeout: 30s
+
+endpoints:
+  - pattern: "/api/v1/users/:id"
+  - pattern: "/api/v1/orders/:order_id/items/:item_id"
+  - pattern: "/api/v1/health"
+
+threshold:
+  relative: 20.0
+  absolute: 0.03
+
+redis:
+  uri: "redis://localhost:6379"
+  stream-key: "riffy:diffs"
+  aggregation-interval: 10s
+  aggregation-key-prefix: "riffy:agg"
+
+server:
+  address: "0.0.0.0"
+  port: 8888
+
+logging:
+  level: info
+
+metrics:
+  enabled: true
+  port: 9090
