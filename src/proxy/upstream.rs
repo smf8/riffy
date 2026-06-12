@@ -39,9 +39,12 @@ impl UpstreamClient {
         protocol: String,
         timeout: Duration,
     ) -> Self {
+        // Upstream targets are direct (in-cluster) services; never route them
+        // through HTTP_PROXY/HTTPS_PROXY from the environment.
         let client = Client::builder()
             .timeout(timeout)
             .pool_max_idle_per_host(2)
+            .no_proxy()
             .build()
             .expect("failed to build reqwest client");
 

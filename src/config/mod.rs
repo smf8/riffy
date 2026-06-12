@@ -5,6 +5,9 @@ use figment::{
 use serde::Deserialize;
 use std::time::Duration;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[allow(dead_code)] // fields used in later phases
@@ -142,5 +145,59 @@ pub fn load() -> anyhow::Result<Riffy> {
             Env::prefixed("RIFFY_").map(|k| k.as_str().replace("__", ".").replace('_', "-").into()),
         )
         .extract()?;
+    config.validate()?;
     Ok(config)
+}
+
+impl Riffy {
+    /// Startup-time sanity checks beyond serde's type validation.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        use anyhow::ensure;
+
+        ensure!(
+            !self.service_name.trim().is_empty(),
+            "riffy.service-name must not be empty"
+        );
+
+        for (role, host) in [
+            ("primary", &self.upstream.primary),
+            ("secondary", &self.upstream.secondary),
+            ("candidate", &self.upstream.candidate),
+        ] {
+            ensure!(!host.trim().is_empty(), "upstream.{role} must not be empty");
+        }
+
+        ensure!(
+            matches!(self.upstream.protocol.as_str(), "http" | "https"),
+            "upstream.protocol must be http or https, got '{}'",
+            self.upstream.protocol
+        );
+
+        for endpoint in &self.endpoints {
+            ensure!(
+                endpoint.pattern.starts_with('/'),
+                "endpoint pattern '{}' must start with '/'",
+                endpoint.pattern
+            );
+        }
+
+        ensure!(
+            self.threshold.relative >= 0.0,
+            "threshold.relative must be >= 0"
+        );
+        ensure!(
+            self.threshold.absolute >= 0.0,
+            "threshold.absolute must be >= 0"
+        );
+        ensure!(
+            self.proxy.port != self.server.port,
+            "proxy.port and server.port must differ"
+        );
+        ensure!(
+            !self.redis.uri.trim().is_empty(),
+            "redis.uri must not be empty"
+        );
+
+        Ok(())
+    }
 }

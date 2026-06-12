@@ -1,6 +1,6 @@
 # Riffy — Progress Tracker
 
-## Status: PHASE 1 COMPLETE (REVISED) — Ready for Phase 2 (Diff Engine)
+## Status: ALL PHASES (1–5) COMPLETE
 
 ## Decisions Log
 
@@ -47,31 +47,31 @@
 
 **make format + make lint pass clean.**
 
-### Phase 2: Diff Engine ← NEXT
-- [ ] 2.1 src/compare/mod.rs — Difference ADT + diff()
-- [ ] 2.2 src/compare/flatten.rs — recursive flatten to dot-path map
-- [ ] 2.3 Unit tests for diff engine
+### Phase 2: Diff Engine ✅
+- [x] 2.1 src/compare/mod.rs — Difference ADT + diff()
+- [x] 2.2 src/compare/flatten.rs — recursive flatten to dot-path map
+- [x] 2.3 Unit tests for diff engine (src/compare/tests/)
 
-### Phase 3: Analysis Pipeline
-- [ ] 3.1 src/endpoint/mod.rs — path template matching
-- [ ] 3.2 src/analysis/collector.rs — DashMap InMemoryDifferenceCollector
-- [ ] 3.3 src/analysis/joined.rs — JoinedField + threshold calculations
-- [ ] 3.4 src/analysis/filter.rs — DifferencesFilterFactory predicate
-- [ ] 3.5 src/analysis/mod.rs — DifferenceAnalyzer wiring
+### Phase 3: Analysis Pipeline ✅
+- [x] 3.1 src/endpoint/mod.rs — path template matching (EndpointMatcher; resolution happens in consumer, off hot path)
+- [x] 3.2 src/analysis/collector.rs — DashMap InMemoryDifferenceCollector
+- [x] 3.3 src/analysis/joined.rs — JoinedField + threshold calculations
+- [x] 3.4 src/analysis/filter.rs — DifferencesFilter predicate (factory pattern simplified to a struct)
+- [x] 3.5 src/analysis/mod.rs — DifferenceCollector trait + DifferenceAnalyzer
 
-### Phase 4: Redis Output
-- [ ] 4.1 src/redis/mod.rs — connection pool, XADD, HSET
-- [ ] 4.2 src/pipeline/mod.rs — mpsc channel, AnalysisMessage
-- [ ] 4.3 src/pipeline/consumer.rs — consumer task
+### Phase 4: Redis Output ✅
+- [x] 4.1 src/redis/mod.rs — DiffStore trait; store.rs (RedisDiffStore: ConnectionManager, XADD, pipelined HSET); memory.rs (InMemoryDiffStore for tests)
+- [x] 4.2 src/pipeline/mod.rs — mpsc channel, AnalysisMessage (moved here from proxy/router.rs)
+- [x] 4.3 src/pipeline/consumer.rs — consumer task (endpoint resolve → analyze → XADD → periodic + final aggregation flush)
 
-### Phase 5: Observability + Hardening
-- [ ] 5.1 src/telemetry/mod.rs — tracing subscriber (already done in main.rs)
-- [ ] 5.2 src/telemetry/metrics.rs — Prometheus exporter + middleware
-- [ ] 5.3 Graceful shutdown in main.rs (already done)
-- [ ] 5.4 Health check endpoint (already done — GET /healthz)
-- [ ] 5.5 Side-effect safety (already done in handler.rs)
-- [ ] 5.6 Config validation
-- [ ] 5.7 Integration test
+### Phase 5: Observability + Hardening ✅
+- [x] 5.1 src/telemetry/mod.rs — init_tracing moved here from main.rs
+- [x] 5.2 src/telemetry/metrics.rs — Prometheus exporter (admin /metrics), proxy middleware (request total + duration), upstream durations, pipeline lag, diff fields counters
+- [x] 5.3 Graceful shutdown — consumer now drained with 5s timeout (was abort())
+- [x] 5.4 Health check endpoint (GET /healthz on admin port)
+- [x] 5.5 Side-effect safety (handler.rs)
+- [x] 5.6 Config validation — Riffy::validate() called from config::load()
+- [x] 5.7 Integration test — tests/proxy_integration.rs (3 mock upstreams → proxy → InMemoryDiffStore)
 
 ## Files Created (Phase 1)
 
@@ -87,13 +87,34 @@
 | src/proxy/handler.rs | proxy_handler: side-effect check, primary first, tokio::spawn for candidate+secondary, correct content-length |
 | src/proxy/router.rs | AppState, AnalysisMessage, catch-all router |
 
+## Revisions (Phases 2–5)
+
+| Rev | What changed | Why |
+|-----|-------------|-----|
+| R7 | OrderingDifference detection moved to the same-size array branch (multiset-equal → Ordering) | The old check (different sizes, both set-diffs empty) was mathematically unreachable. Matches diffy semantics. |
+| R8 | Flatten paths: no leading dot for root fields, arrays use `parent.0` (was `parent[0]`) | Conform to Plan.md §Flattening dot-path spec. |
+| R9 | TypeDifference dropped `left_type`/`right_type` fields | Never read; types are evident from the stored left/right values. |
+| R10 | All unit tests moved to `tests/` subdirectories per module (src/*/tests/*.rs) | Project convention: tests never co-located with implementation. |
+| R11 | Endpoint resolution happens in the consumer + metrics middleware, not the proxy handler | Keeps analysis work off the hot path; middleware shares the resolved key via request extensions. |
+| R12 | Handler uses `try_send` (drops newest on full channel, warns) | Plan said "drop oldest"; try_send is the simple non-blocking equivalent without consumer cooperation. |
+| R13 | Diff entries written to the stream only when raw/noise diffs are non-empty or statuses mismatch | Avoids flooding Redis with no-op entries; totals still counted in the collector. |
+| R14 | DiffStore trait (redis/mod.rs) with RedisDiffStore + InMemoryDiffStore impls | Redis conventions: storage behind a trait, swappable for tests/local dev. |
+| R15 | redis crate `connection-manager` feature; ConnectionManager for auto-reconnect; pipelined HSET aggregation | Minimize RTT, survive Redis restarts. |
+| R16 | ~~Compressed (content-encoding) bodies are skipped in analysis~~ Superseded by R20. | — |
+| R17 | Crate split into lib (src/lib.rs) + thin bin (src/main.rs) | Required so tests/ at crate root can drive the proxy end-to-end. |
+| R18 | UpstreamClient sets reqwest `.no_proxy()` | Upstreams are direct in-cluster targets; env HTTP_PROXY (set on this dev machine) silently broke upstream calls. |
+| R19 | Consumer drained on shutdown (5s timeout) instead of abort() | Final aggregation snapshot flush before exit. |
+| R20 | async-compression (user-approved): pipeline/decode.rs decompresses gzip/x-gzip, deflate (zlib per RFC 9110), br, zstd before JSON parsing | Analysis-side only, off the hot path. Unsupported encodings and corrupt bodies are skipped with a warning. |
+| R21 | Cancellation-aware metrics via drop guards (ProxyRequestGuard, UpstreamTimer in telemetry/metrics.rs): `riffy_proxy_request_total` status gains `cancelled`; `riffy_upstream_request_duration_seconds` gains `outcome` label (ok/error/cancelled) — a label deviation from Plan.md | Drop-based cancellation skipped all post-await recording, so abandoned (slowest) requests were invisible and histograms had survivorship bias; upstream errors/timeouts were also indistinguishable from successes. |
+
 ## Notes for Next Session
 
-- Phase 1 revised per user feedback. All 7 review items addressed.
-- Proxy flow: primary = blocking hot path, candidate+secondary = background analysis only.
-- Compression: raw bytes passthrough. No reqwest decompression. Analysis pipeline must handle decompression for JSON parsing (Phase 3/4).
-- JSON validation lives in analysis pipeline, not proxy handler.
-- Placeholder consumer task in main.rs logs analysis messages. Phase 4 replaces it.
-- `AnalysisMessage` carries all 3 upstream responses. Uses raw path as endpoint (TODO: path template matching in Phase 3).
-- Module dirs exist: `src/{compare,analysis,endpoint,pipeline,redis,telemetry}` — all empty, ready for Phase 2+.
+- **All 5 phases complete.** `make format`, `make lint` (zero warnings) and `make test` (101 tests: unit + integration) pass.
+- Metrics are cancellation-aware (R21): `ProxyRequestGuard`/`UpstreamTimer` drop guards record `cancelled` samples when futures are dropped mid-flight. Guard tests install a real Prometheus recorder (process-global, shared via OnceLock in src/telemetry/tests/).
+- Decompression decision resolved: user chose **async-compression** (R20). Supported: gzip, x-gzip, deflate (zlib), br, zstd. Multi-token `content-encoding` values (e.g. "gzip, br") are not handled — treated as unsupported and skipped.
+- **Open question:** the Redis stream (`riffy:diffs`) is uncapped — consider a configurable `XADD MAXLEN ~ N` to bound memory.
+- `metrics.port` config field is currently unused — metrics are served on the admin port (`server.port`) at `/metrics`. Either honor it with a separate listener or remove the field.
+- Real-Redis behavior (RedisDiffStore) is exercised only at the type level; integration tests use InMemoryDiffStore. Manual verification against `docker compose up -d` Redis still pending.
+- Per-request param values from `:param` templates are not captured (only the template is used as the endpoint key) — not needed by the current data model.
+- **docs/architecture.md** holds the runtime DAG (Mermaid) + metrics/Redis data tables; it documents what the code does and cites R# revisions on deviations from Plan.md. Maintain it via the `update-architecture-doc` skill (`.claude/skills/update-architecture-doc/SKILL.md`), which also encodes the standing doc rules from user feedback.
 - See Plan.md for full architecture, algorithms, and implementation details.

@@ -1,8 +1,10 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-#[allow(dead_code)]
-pub enum RedisError {
-    #[error("redis error: {0}")]
-    Connection(#[source] redis::RedisError),
+pub enum StoreError {
+    #[error("redis command failed: {0}")]
+    Redis(#[source] redis::RedisError),
+
+    #[error("serialization failed: {0}")]
+    Serialize(#[source] serde_json::Error),
 }

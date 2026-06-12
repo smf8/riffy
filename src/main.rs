@@ -2,26 +2,23 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-mod analysis;
-mod compare;
-mod config;
-mod endpoint;
-mod error;
-mod pipeline;
-mod proxy;
-mod redis;
-mod telemetry;
-
-use proxy::router::{create_router, AppState};
-use proxy::UpstreamClient;
+use anyhow::Context;
+use riffy::analysis::collector::InMemoryDifferenceCollector;
+use riffy::analysis::filter::DifferencesFilter;
+use riffy::endpoint::EndpointMatcher;
+use riffy::pipeline::consumer::Consumer;
+use riffy::proxy::handler::healthz;
+use riffy::proxy::router::{create_router, AppState};
+use riffy::proxy::UpstreamClient;
+use riffy::redis::RedisDiffStore;
+use riffy::{config, pipeline, telemetry};
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load config
     let cfg = config::load()?;
-    init_tracing(&cfg.logging);
+    telemetry::init_tracing(&cfg.logging);
 
     tracing::info!(service = %cfg.service_name, "starting riffy");
 
@@ -34,19 +31,43 @@ async fn main() -> anyhow::Result<()> {
         cfg.upstream.timeout,
     );
 
-    // Analysis channel (bounded)
-    let (analysis_tx, mut analysis_rx) = mpsc::channel::<proxy::AnalysisMessage>(1024);
+    // Analysis pipeline: bounded channel → single consumer task
+    let (analysis_tx, analysis_rx) = pipeline::channel();
 
-    // Spawn analysis consumer (placeholder — phase 4 will implement)
-    let consumer_handle = tokio::spawn(async move {
-        while let Some(msg) = analysis_rx.recv().await {
-            tracing::debug!(
-                endpoint = %msg.endpoint,
-                method = %msg.method,
-                "received analysis message (consumer not yet implemented)"
-            );
-        }
-    });
+    let collector = Arc::new(InMemoryDifferenceCollector::new());
+    let matcher = Arc::new(EndpointMatcher::new(
+        cfg.endpoints.iter().map(|e| e.pattern.as_str()),
+    ));
+    let filter = DifferencesFilter::from_config(&cfg.threshold);
+    let store = Arc::new(
+        RedisDiffStore::connect(
+            &cfg.redis.uri,
+            cfg.redis.stream_key.clone(),
+            cfg.redis.aggregation_key_prefix.clone(),
+        )
+        .await
+        .context("failed to connect to redis")?,
+    );
+
+    let consumer_handle = Consumer::new(
+        analysis_rx,
+        matcher.clone(),
+        collector,
+        filter,
+        store,
+        cfg.redis.aggregation_interval,
+    )
+    .spawn();
+
+    // Prometheus exporter (admin /metrics renders empty when disabled)
+    let metrics_handle = if cfg.metrics.enabled {
+        Some(
+            telemetry::metrics::install_prometheus()
+                .context("failed to install prometheus recorder")?,
+        )
+    } else {
+        None
+    };
 
     let cfg = Arc::new(cfg);
     let upstream = Arc::new(upstream);
@@ -54,8 +75,9 @@ async fn main() -> anyhow::Result<()> {
     // AppState
     let state = AppState {
         config: cfg.clone(),
-        upstream: upstream.clone(),
+        upstream,
         analysis_tx,
+        matcher,
     };
 
     // Proxy server
@@ -65,11 +87,14 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %proxy_addr, "proxy server listening");
 
     // Admin server (healthz + metrics)
-    let admin_port = cfg.server.port;
     let admin_app = axum::Router::new()
         .route("/healthz", axum::routing::get(healthz))
-        .route("/metrics", axum::routing::get(metrics_handler));
-    let admin_addr = format!("{}:{}", cfg.server.address, admin_port);
+        .route(
+            "/metrics",
+            axum::routing::get(telemetry::metrics::render_metrics),
+        )
+        .with_state(metrics_handle);
+    let admin_addr = format!("{}:{}", cfg.server.address, cfg.server.port);
     let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;
     tracing::info!(addr = %admin_addr, "admin server listening");
 
@@ -99,48 +124,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    consumer_handle.abort();
+    // The servers (and their AppState holding the analysis sender) are dropped
+    // once select! returns; the consumer then drains the channel, flushes a
+    // final aggregation snapshot, and exits.
+    match tokio::time::timeout(std::time::Duration::from_secs(5), consumer_handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "analysis consumer task failed"),
+        Err(_) => tracing::warn!("analysis consumer did not stop within 5s"),
+    }
+
     Ok(())
-}
-
-async fn healthz() -> axum::http::StatusCode {
-    axum::http::StatusCode::NO_CONTENT
-}
-
-async fn metrics_handler() -> String {
-    // Placeholder — phase 5 will wire Prometheus exporter
-    "# riffy metrics placeholder\n".to_string()
-}
-
-fn init_tracing(logging: &config::Logging) {
-    use std::str::FromStr;
-    use tracing::Level;
-    use tracing_subscriber::fmt::time::ChronoLocal;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::EnvFilter;
-
-    let level = Level::from_str(&logging.level).expect("invalid log level");
-
-    let console_format = tracing_subscriber::fmt::format()
-        .with_ansi(true)
-        .with_file(true)
-        .with_line_number(true)
-        .with_timer(ChronoLocal::default());
-
-    let subscriber = tracing_subscriber::Registry::default().with(
-        EnvFilter::default()
-            .add_directive(level.into())
-            .add_directive("hyper_util=info".parse().expect("invalid directive"))
-            .add_directive("h2=info".parse().expect("invalid directive"))
-            .add_directive("tower=info".parse().expect("invalid directive")),
-    );
-
-    let subscriber = subscriber.with(
-        tracing_subscriber::fmt::layer()
-            .json()
-            .event_format(console_format),
-    );
-
-    subscriber.init();
 }

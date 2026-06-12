@@ -1,19 +1,26 @@
+use std::time::Instant;
+
 use crate::error::AppError;
-use crate::proxy::router::{AnalysisMessage, AppState};
+use crate::pipeline::AnalysisMessage;
+use crate::proxy::router::AppState;
+use crate::telemetry::metrics::{ResolvedEndpoint, UpstreamTimer};
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::Method;
 use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use tracing::Instrument;
 
-#[tracing::instrument(skip(state, headers, body), fields(method = %method, path = %uri))]
+#[tracing::instrument(skip(state, endpoint, headers, body), fields(method = %method, path = %uri))]
 pub async fn proxy_handler(
     State(state): State<AppState>,
+    Extension(endpoint): Extension<ResolvedEndpoint>,
     method: Method,
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
+    let received_at = Instant::now();
     let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
     // Side-effect safety check
@@ -30,6 +37,7 @@ pub async fn proxy_handler(
     let path = uri.path();
 
     // 1. Forward to primary FIRST — blocking hot path, zero added latency
+    let primary_timer = UpstreamTimer::start("primary", endpoint.0.clone());
     let primary_result = state
         .upstream
         .send(
@@ -40,6 +48,7 @@ pub async fn proxy_handler(
             body.clone(),
         )
         .await;
+    primary_timer.finish(primary_result.is_ok());
 
     let primary_response = primary_result.map_err(|e| {
         tracing::error!(error = %e, "primary upstream failed");
@@ -73,26 +82,44 @@ pub async fn proxy_handler(
     let path_owned = path.to_string();
     let path_and_query_owned = path_and_query.to_string();
     let headers_clone = headers.clone();
+    let endpoint_key = endpoint.0.clone();
 
     let analysis_span = tracing::info_span!("analysis", endpoint = %path);
 
     tokio::spawn(
         async move {
-            let candidate_future = upstream.send(
-                &upstream.candidate,
-                &method_clone,
-                &path_and_query_owned,
-                &headers_clone,
-                body.clone(),
-            );
+            let candidate_body = body.clone();
+            let secondary_body = body;
 
-            let secondary_future = upstream.send(
-                &upstream.secondary,
-                &method_clone,
-                &path_and_query_owned,
-                &headers_clone,
-                body,
-            );
+            let candidate_future = async {
+                let timer = UpstreamTimer::start("candidate", endpoint_key.clone());
+                let result = upstream
+                    .send(
+                        &upstream.candidate,
+                        &method_clone,
+                        &path_and_query_owned,
+                        &headers_clone,
+                        candidate_body,
+                    )
+                    .await;
+                timer.finish(result.is_ok());
+                result
+            };
+
+            let secondary_future = async {
+                let timer = UpstreamTimer::start("secondary", endpoint_key.clone());
+                let result = upstream
+                    .send(
+                        &upstream.secondary,
+                        &method_clone,
+                        &path_and_query_owned,
+                        &headers_clone,
+                        secondary_body,
+                    )
+                    .await;
+                timer.finish(result.is_ok());
+                result
+            };
 
             let (candidate_result, secondary_result) =
                 tokio::join!(candidate_future, secondary_future);
@@ -105,20 +132,25 @@ pub async fn proxy_handler(
             }
 
             let msg = AnalysisMessage {
-                endpoint: path_owned.clone(),
-                method: method_clone.to_string(),
                 path: path_owned,
-                primary_response: Some(primary_response),
+                received_at,
+                primary_response,
                 candidate_response: candidate_result.ok(),
                 secondary_response: secondary_result.ok(),
             };
 
-            if analysis_tx.send(msg).await.is_err() {
-                tracing::warn!("analysis channel closed, dropping diff");
+            // try_send sheds load when the consumer lags instead of queueing
+            // unbounded background tasks behind a full channel.
+            if let Err(e) = analysis_tx.try_send(msg) {
+                tracing::warn!(error = %e, "analysis channel unavailable, dropping diff");
             }
         }
         .instrument(analysis_span),
     );
 
     Ok(client_response.into_response())
+}
+
+pub async fn healthz() -> axum::http::StatusCode {
+    axum::http::StatusCode::NO_CONTENT
 }
