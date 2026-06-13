@@ -1,0 +1,9 @@
+target/
+.git/
+.idea/
+.claude/
+docs/
+tests/
+*.md
+docker-compose.yaml
+config.yaml
