@@ -10,7 +10,6 @@ mod tests;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)] // fields used in later phases
 pub struct Riffy {
     pub service_name: String,
     pub proxy: Proxy,
@@ -53,7 +52,6 @@ fn default_timeout() -> Duration {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)]
 pub struct Threshold {
     #[serde(default = "default_relative_threshold")]
     pub relative: f64,
@@ -71,14 +69,12 @@ fn default_absolute_threshold() -> f64 {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)]
 pub struct EndpointPattern {
     pub pattern: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)]
 pub struct RedisConfig {
     pub uri: String,
     #[serde(default = "default_stream_key")]
@@ -121,7 +117,6 @@ fn default_log_level() -> String {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[allow(dead_code)]
 pub struct Metrics {
     #[serde(default = "default_true")]
     pub enabled: bool,

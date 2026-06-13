@@ -1,6 +1,6 @@
 # Riffy — Progress Tracker
 
-## Status: ALL PHASES (1–5) COMPLETE
+## Status: ALL PHASES (1–5) COMPLETE + review.md fixes applied (R22–R27)
 
 ## Decisions Log
 
@@ -107,10 +107,22 @@
 | R20 | async-compression (user-approved): pipeline/decode.rs decompresses gzip/x-gzip, deflate (zlib per RFC 9110), br, zstd before JSON parsing | Analysis-side only, off the hot path. Unsupported encodings and corrupt bodies are skipped with a warning. |
 | R21 | Cancellation-aware metrics via drop guards (ProxyRequestGuard, UpstreamTimer in telemetry/metrics.rs): `riffy_proxy_request_total` status gains `cancelled`; `riffy_upstream_request_duration_seconds` gains `outcome` label (ok/error/cancelled) — a label deviation from Plan.md | Drop-based cancellation skipped all post-await recording, so abandoned (slowest) requests were invisible and histograms had survivorship bias; upstream errors/timeouts were also indistinguishable from successes. |
 
+## Revisions (review.md fixes)
+
+| Rev | What changed | Why |
+|-----|-------------|-----|
+| R22 | Generic type parameters removed: `Consumer<C, S>` → plain `Consumer` holding `Arc<dyn DifferenceCollector>` + `Arc<dyn DiffStore>`; `EndpointMatcher::new<I, S>` → `new(&[String])`; `DiffStore` converted to `#[async_trait]` (new `async-trait` dep) so it works as a trait object — boxing is analysis-side only, never on the hot path | review.md: code must be easy to understand for non-Rust experts; no unnecessary generics. |
+| R23 | Consumer checks HTTP status before comparing bodies: a body is decoded/parsed/diffed only when that upstream returned the same status as primary; a different status is reported directly as the signal. `DifferenceAnalyzer` dissolved into the consumer (it reduced to a passthrough); `AnalysisError` deleted; analyzer tests merged into consumer tests | review.md: skip body processing on status mismatch; no Option params in analysis. |
+| R24 | New `src/handler/` module owns all HTTP input: `handler/proxy.rs` (proxy_handler), `handler/router.rs` (AppState, proxy router, admin router with /healthz + /metrics — moved out of main.rs). `src/proxy/` keeps only actual proxying (upstream.rs, error.rs) | review.md: separate HTTP input interactions from proxying. |
+| R25 | `src/redis/` → `src/storage/`: `DiffStore` trait + models (DiffEntry, EndpointAggregation, FieldAggregation) in mod.rs per the traits-in-mod.rs convention; `redis.rs` (RedisDiffStore), `memory.rs` (InMemoryDiffStore). Redis key conventions unchanged | review.md: model + trait don't belong in a backend-named module. |
+| R26 | Dockerfile (multi-stage: rust:1.94-slim + cargo-chef layer caching → distroless/cc-debian12:nonroot, non-root UID 65532, rustls so no OpenSSL) + .dockerignore + `[profile.release]` lto=thin, strip=true (panic stays unwind so a panicking analysis task can't abort the proxy) | review.md: production-ready image with security/performance best practices. |
+| R27 | Diff-crate feasibility researched (serde_json_diff, jsondiffpatch, json_diff_ng, treediff, json-patch): none implement the diffy multiset/ordering array semantics (serde_json_diff is positional-only, jsondiffpatch is LCS, json-patch is a patch format). Custom `compare` module stays | review.md: evaluate replacing compare with an existing crate. |
+| R28 | All per-item `#[allow(dead_code)]` attributes removed (supersedes R6); `make lint` now passes `-A dead_code` to clippy instead. `#[allow(unused_imports)]` re-export attrs (storage/mod.rs, compare/mod.rs) are untouched — different lint | User request: one Makefile-level policy beats 12 scattered attributes. Note: plain `cargo build` now prints dead_code warnings; only `make lint` suppresses them. |
+
 ## Notes for Next Session
 
-- **All 5 phases complete.** `make format`, `make lint` (zero warnings) and `make test` (101 tests: unit + integration) pass.
-- Metrics are cancellation-aware (R21): `ProxyRequestGuard`/`UpstreamTimer` drop guards record `cancelled` samples when futures are dropped mid-flight. Guard tests install a real Prometheus recorder (process-global, shared via OnceLock in src/telemetry/tests/).
+- **All 5 phases complete; review.md fixes (R22–R27) applied.** `make format`, `make lint` (zero warnings) and `make test` (97 tests: unit + integration) pass. Test count dropped from 101: six analyzer tests merged/removed with the analyzer, two new consumer tests added (status-mismatch skips body compare; invalid candidate JSON skipped).
+- **Docker image build not yet verified** — the Docker daemon was not running on this machine. Run `docker build -t riffy .` to confirm the multi-stage build (cargo-chef install + release build inside the container takes several minutes on first run).- Metrics are cancellation-aware (R21): `ProxyRequestGuard`/`UpstreamTimer` drop guards record `cancelled` samples when futures are dropped mid-flight. Guard tests install a real Prometheus recorder (process-global, shared via OnceLock in src/telemetry/tests/).
 - Decompression decision resolved: user chose **async-compression** (R20). Supported: gzip, x-gzip, deflate (zlib), br, zstd. Multi-token `content-encoding` values (e.g. "gzip, br") are not handled — treated as unsupported and skipped.
 - **Open question:** the Redis stream (`riffy:diffs`) is uncapped — consider a configurable `XADD MAXLEN ~ N` to bound memory.
 - `metrics.port` config field is currently unused — metrics are served on the admin port (`server.port`) at `/metrics`. Either honor it with a separate listener or remove the field.

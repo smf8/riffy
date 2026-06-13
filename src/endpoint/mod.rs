@@ -59,16 +59,9 @@ pub struct EndpointMatcher {
 }
 
 impl EndpointMatcher {
-    pub fn new<I, S>(patterns: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
+    pub fn new(patterns: &[String]) -> Self {
         Self {
-            patterns: patterns
-                .into_iter()
-                .map(|p| Pattern::parse(p.as_ref()))
-                .collect(),
+            patterns: patterns.iter().map(|p| Pattern::parse(p)).collect(),
         }
     }
 

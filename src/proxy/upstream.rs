@@ -11,14 +11,12 @@ pub struct UpstreamResponse {
     pub body: Bytes,
 }
 
-#[allow(dead_code)]
 pub struct UpstreamClient {
     client: Client,
     pub primary: String,
     pub secondary: String,
     pub candidate: String,
     pub protocol: String,
-    #[allow(dead_code)]
     pub timeout: Duration,
 }
 
@@ -120,7 +118,6 @@ impl UpstreamClient {
         })
     }
 
-    #[allow(dead_code)]
     pub fn targets(&self) -> [&str; 3] {
         [&self.primary, &self.candidate, &self.secondary]
     }

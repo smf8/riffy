@@ -24,16 +24,16 @@ the doc follows the code and cites the revision number (R#) from
 
 1. Read the current `docs/architecture.md` and the diff you just made.
 2. Trace the affected path in code — do not write from memory. The flow lives
-   in: `src/proxy/router.rs` → `src/telemetry/metrics.rs` (middleware) →
-   `src/proxy/handler.rs` → `src/proxy/upstream.rs` → `src/pipeline/mod.rs` →
+   in: `src/handler/router.rs` → `src/telemetry/metrics.rs` (middleware) →
+   `src/handler/proxy.rs` → `src/proxy/upstream.rs` → `src/pipeline/mod.rs` →
    `src/pipeline/consumer.rs` (→ `decode.rs`, `src/endpoint/`,
-   `src/analysis/`, `src/compare/`) → `src/redis/`.
+   `src/analysis/`, `src/compare/`) → `src/storage/`.
 3. Update the DAG nodes/edges and the tables together — a table that
    contradicts the diagram is worse than no update.
 4. Verify every literal name against code before saving (names must be
    copy-pasteable):
    - metrics: `grep -rn 'metrics::\(counter\|histogram\)' src/`
-   - Redis keys/fields: `grep -rn 'xadd\|hset\|stream_key\|aggregation_key_prefix' src/redis/`
+   - Redis keys/fields: `grep -rn 'xadd\|hset\|stream_key\|aggregation_key_prefix' src/storage/`
    - config keys: check `src/config/mod.rs` (kebab-case serde renames) and `config.example.yaml`
    - file paths named in node labels: confirm each file still exists.
 5. If the architecture deviated from `Plan.md`, add a numbered revision row to

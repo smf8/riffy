@@ -15,10 +15,10 @@ use riffy::config::{
     EndpointPattern, Logging, Metrics, Proxy, RedisConfig, Riffy, Server, Threshold, Upstream,
 };
 use riffy::endpoint::EndpointMatcher;
+use riffy::handler::router::{create_router, AppState};
 use riffy::pipeline::consumer::Consumer;
-use riffy::proxy::router::{create_router, AppState};
 use riffy::proxy::UpstreamClient;
-use riffy::redis::{DiffEntry, InMemoryDiffStore};
+use riffy::storage::{DiffEntry, InMemoryDiffStore};
 use serde_json::{json, Value};
 
 async fn spawn_json_upstream(body: Value) -> SocketAddr {
@@ -97,7 +97,7 @@ async fn spawn_proxy(
     let (analysis_tx, analysis_rx) = riffy::pipeline::channel();
     let collector = Arc::new(InMemoryDifferenceCollector::new());
     let store = Arc::new(InMemoryDiffStore::new());
-    let matcher = Arc::new(EndpointMatcher::new(["/api/v1/users/:id"]));
+    let matcher = Arc::new(EndpointMatcher::new(&["/api/v1/users/:id".to_owned()]));
 
     Consumer::new(
         analysis_rx,

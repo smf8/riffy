@@ -6,13 +6,11 @@ use tokio::sync::Mutex;
 
 /// In-memory `DiffStore` for tests and local development without Redis.
 #[derive(Default)]
-#[allow(dead_code)] // exercised from tests; production wiring uses RedisDiffStore
 pub struct InMemoryDiffStore {
     entries: Mutex<Vec<DiffEntry>>,
     aggregations: Mutex<HashMap<String, EndpointAggregation>>,
 }
 
-#[allow(dead_code)]
 impl InMemoryDiffStore {
     pub fn new() -> Self {
         Self::default()
@@ -27,6 +25,7 @@ impl InMemoryDiffStore {
     }
 }
 
+#[async_trait::async_trait]
 impl DiffStore for InMemoryDiffStore {
     async fn append_diff(&self, entry: &DiffEntry) -> Result<(), StoreError> {
         self.entries.lock().await.push(entry.clone());

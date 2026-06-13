@@ -40,6 +40,9 @@ dashmap = "6"
 anyhow = "1"
 thiserror = "2"
 
+# Dyn-compatible async traits (DiffStore); analysis side only, off the hot path
+async-trait = "0.1"
+
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["chrono", "json", "env-filter"] }
@@ -53,3 +56,10 @@ tikv-jemallocator = { version = "0.6", optional = true }
 [features]
 default = ["jemalloc"]
 jemalloc = ["tikv-jemallocator"]
+
+# Production release profile: thin LTO for runtime performance, symbols
+# stripped for a small image. Panics keep the default unwind so a panicking
+# background analysis task is contained by tokio instead of aborting the proxy.
+[profile.release]
+lto = "thin"
+strip = true

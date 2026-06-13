@@ -1,11 +1,15 @@
 use crate::endpoint::EndpointMatcher;
 
+fn patterns(raw: &[&str]) -> Vec<String> {
+    raw.iter().map(|p| p.to_string()).collect()
+}
+
 fn matcher() -> EndpointMatcher {
-    EndpointMatcher::new([
+    EndpointMatcher::new(&patterns(&[
         "/api/v1/users/:id",
         "/api/v1/orders/:order_id/items/:item_id",
         "/api/v1/health",
-    ])
+    ]))
 }
 
 #[test]
@@ -59,12 +63,12 @@ fn trailing_slash_is_normalized() {
 
 #[test]
 fn first_matching_pattern_wins() {
-    let m = EndpointMatcher::new(["/a/:x", "/a/b"]);
+    let m = EndpointMatcher::new(&patterns(&["/a/:x", "/a/b"]));
     assert_eq!(m.resolve("/a/b"), "/a/:x");
 }
 
 #[test]
 fn empty_matcher_returns_raw_path() {
-    let m = EndpointMatcher::new(Vec::<String>::new());
+    let m = EndpointMatcher::new(&[]);
     assert_eq!(m.resolve("/anything"), "/anything");
 }

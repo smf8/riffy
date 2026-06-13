@@ -8,7 +8,7 @@ use crate::endpoint::EndpointMatcher;
 use crate::pipeline::consumer::Consumer;
 use crate::pipeline::AnalysisMessage;
 use crate::proxy::upstream::UpstreamResponse;
-use crate::redis::InMemoryDiffStore;
+use crate::storage::InMemoryDiffStore;
 use axum::http::HeaderMap;
 use bytes::Bytes;
 
@@ -44,7 +44,7 @@ async fn run_consumer(
     let (tx, rx) = crate::pipeline::channel();
     let collector = Arc::new(InMemoryDifferenceCollector::new());
     let store = Arc::new(InMemoryDiffStore::new());
-    let matcher = Arc::new(EndpointMatcher::new(["/api/v1/users/:id"]));
+    let matcher = Arc::new(EndpointMatcher::new(&["/api/v1/users/:id".to_owned()]));
     let filter = DifferencesFilter::new(20.0, 0.03);
 
     let handle = Consumer::new(
@@ -117,6 +117,44 @@ async fn status_mismatch_alone_produces_entry() {
     assert_eq!(entries.len(), 1);
     assert!(entries[0].raw_fields.is_empty());
     assert_eq!(entries[0].candidate_status, Some(500));
+}
+
+#[tokio::test]
+async fn mismatched_status_skips_body_comparison() {
+    // The candidate body differs, but with a different status the bodies must
+    // never be compared — the status mismatch is the reported signal.
+    let mut msg = message(
+        "/api/v1/users/1",
+        r#"{"a": 1}"#,
+        Some(r#"{"a": 2}"#),
+        Some(r#"{"a": 1}"#),
+    );
+    msg.candidate_response.as_mut().unwrap().status = 503;
+
+    let (store, collector) = run_consumer(vec![msg]).await;
+
+    let entries = store.entries().await;
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].raw_fields.is_empty());
+    assert_eq!(entries[0].candidate_status, Some(503));
+    // No field counters moved, only the endpoint total.
+    let snapshot = collector.snapshot();
+    assert_eq!(snapshot[0].total, 1);
+    assert!(snapshot[0].fields.is_empty());
+}
+
+#[tokio::test]
+async fn invalid_candidate_json_is_skipped() {
+    let (store, collector) = run_consumer(vec![message(
+        "/api/v1/users/1",
+        r#"{"a": 1}"#,
+        Some("<html>"),
+        Some(r#"{"a": 1}"#),
+    )])
+    .await;
+
+    assert!(store.entries().await.is_empty());
+    assert_eq!(collector.snapshot()[0].total, 1);
 }
 
 #[tokio::test]

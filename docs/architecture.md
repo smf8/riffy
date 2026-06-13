@@ -19,9 +19,9 @@ This document describes what the code *does today*. Where it deviates from
 flowchart TD
     client(["Client"]) --> mw
 
-    subgraph proxyserver ["Proxy server — axum on proxy.port (src/proxy/router.rs)"]
+    subgraph proxyserver ["Proxy server — axum on proxy.port (src/handler/router.rs, R24)"]
         mw["track_proxy middleware<br/>resolve endpoint template once;<br/>drop-guard records count + duration<br/>exactly once — real status, or<br/>status=cancelled if dropped (R21)<br/>(src/telemetry/metrics.rs)"]
-        guard{"mutating method and<br/>allow-http-side-effects=false?<br/>(src/proxy/handler.rs)"}
+        guard{"mutating method and<br/>allow-http-side-effects=false?<br/>(src/handler/proxy.rs)"}
         mw --> guard
     end
 
@@ -35,7 +35,7 @@ flowchart TD
 
     primary -. "tokio::spawn — fire-and-forget" .-> fanout
 
-    subgraph background ["Background task, one per request (src/proxy/handler.rs)"]
+    subgraph background ["Background task, one per request (src/handler/proxy.rs)"]
         fanout["tokio::join!<br/>CANDIDATE + SECONDARY in parallel<br/>(src/proxy/upstream.rs)"]
         send["try_send AnalysisMessage<br/>bounded mpsc, capacity 1024;<br/>drop newest + warn when full (R12)<br/>(src/pipeline/mod.rs)"]
         fanout --> send
@@ -46,13 +46,18 @@ flowchart TD
     subgraph consumer ["Analysis consumer — single task (src/pipeline/consumer.rs)"]
         recv["recv AnalysisMessage"]
         resolve["EndpointMatcher.resolve<br/>:param template match,<br/>else raw path, query stripped<br/>(src/endpoint/mod.rs)"]
-        decode["decode_body per response:<br/>gzip / x-gzip / deflate(zlib) / br / zstd<br/>via async-compression (R20);<br/>unsupported or corrupt → skip<br/>(src/pipeline/decode.rs)"]
-        analyze["DifferenceAnalyzer.analyze<br/>parse JSON → diff → flatten to dot-paths<br/>raw = primary vs candidate<br/>noise = primary vs secondary<br/>(src/analysis/mod.rs, src/compare/)"]
+        primaryparse["parse primary body:<br/>decode_body — gzip / x-gzip / deflate(zlib) / br / zstd<br/>via async-compression (R20) — then JSON parse;<br/>unparseable → skip request<br/>(src/pipeline/decode.rs, consumer.rs)"]
+        statuscheck{"per upstream:<br/>responded with same<br/>status as primary? (R23)"}
+        diff["parse body, then flatten_value:<br/>diff → flatten to dot-paths<br/>raw = primary vs candidate<br/>noise = primary vs secondary<br/>(src/compare/)"]
+        nodiff["body not compared —<br/>empty diff map; a status mismatch<br/>is itself the signal (R23)"]
         record["DifferenceCollector.record<br/>DashMap + AtomicU64 counters:<br/>endpoint total, per-field raw / noise<br/>(src/analysis/collector.rs)"]
         decide{"any raw/noise diffs,<br/>or upstream status mismatch?"}
         entry["DiffEntry (R13)"]
         skip(["no stream entry —<br/>only counters moved"])
-        recv --> resolve --> decode --> analyze --> record --> decide
+        recv --> resolve --> primaryparse --> statuscheck
+        statuscheck -- "yes" --> diff --> record
+        statuscheck -- "no / upstream failed" --> nodiff --> record
+        record --> decide
         decide -- "yes" --> entry
         decide -- "no" --> skip
 
@@ -65,7 +70,7 @@ flowchart TD
     entry --> xadd
     classify --> hset
 
-    subgraph store ["DiffStore trait (src/redis/mod.rs) — RedisDiffStore (store.rs) / InMemoryDiffStore for tests (memory.rs)"]
+    subgraph store ["DiffStore trait (src/storage/mod.rs, R25) — RedisDiffStore (redis.rs) / InMemoryDiffStore for tests (memory.rs)"]
         xadd[("XADD riffy:diffs<br/>per-request diff entry")]
         hset[("HSET riffy:agg:{endpoint}<br/>pipelined snapshot, one RTT (R15)")]
     end
@@ -81,8 +86,8 @@ acyclic: the ticker is an independent root, not a back-edge.
 flowchart LR
     operator(["Operator / Prometheus"]) --> admin
 
-    subgraph admin ["Admin server — axum on server.port (src/main.rs)"]
-        hz["GET /healthz → 204<br/>(src/proxy/handler.rs)"]
+    subgraph admin ["Admin server — axum on server.port, admin_router (src/handler/router.rs, R24)"]
+        hz["GET /healthz → 204<br/>(src/handler/router.rs)"]
         mx["GET /metrics → PrometheusHandle.render<br/>empty body when metrics.enabled=false<br/>(src/telemetry/metrics.rs)"]
     end
 ```
@@ -141,6 +146,9 @@ status mismatch:
 4. **A failed candidate/secondary must not poison counters:** absent or
    unparseable bodies contribute empty diff maps; an unparseable primary skips
    the request entirely (not counted in totals).
+   Statuses are checked before bodies (R23): a candidate/secondary that
+   answered with a different status than primary is reported as a status
+   mismatch directly — its body is never decoded or compared.
 5. **Backpressure sheds load, it never queues unbounded:** a full analysis
    channel drops the newest message with a warning (R12).
 6. **Every tracked request/upstream call is recorded exactly once (R21):**

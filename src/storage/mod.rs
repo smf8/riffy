@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::future::Future;
 
 use crate::compare::flatten::FlatDiff;
 use chrono::{DateTime, Utc};
@@ -7,11 +6,11 @@ use serde::Serialize;
 
 pub mod error;
 mod memory;
-mod store;
+mod redis;
 
 #[allow(unused_imports)]
 pub use memory::InMemoryDiffStore;
-pub use store::RedisDiffStore;
+pub use redis::RedisDiffStore;
 
 use error::StoreError;
 
@@ -47,13 +46,15 @@ pub struct FieldAggregation {
 
 /// Storage for per-request diffs and periodic aggregation snapshots.
 /// Abstracted so the Redis implementation can be swapped for an in-memory
-/// one in tests and local development.
+/// one in tests and local development. `async_trait` keeps it usable as a
+/// plain `dyn DiffStore` trait object; the boxing it adds only affects the
+/// analysis side, never the proxy hot path.
+#[async_trait::async_trait]
 pub trait DiffStore: Send + Sync {
-    fn append_diff(&self, entry: &DiffEntry)
-        -> impl Future<Output = Result<(), StoreError>> + Send;
+    async fn append_diff(&self, entry: &DiffEntry) -> Result<(), StoreError>;
 
-    fn write_aggregation(
+    async fn write_aggregation(
         &self,
         aggregations: &[EndpointAggregation],
-    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    ) -> Result<(), StoreError>;
 }

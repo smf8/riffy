@@ -17,7 +17,6 @@ pub use diff::diff;
 pub enum Difference {
     /// Both values are structurally equal. Contains the value for convenience.
     /// The payload is unread today but kept for parity with diffy's ADT.
-    #[allow(dead_code)]
     NoDifference(Value),
 
     /// Both sides are primitive (bool, number, string) but differ.

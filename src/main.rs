@@ -6,11 +6,10 @@ use anyhow::Context;
 use riffy::analysis::collector::InMemoryDifferenceCollector;
 use riffy::analysis::filter::DifferencesFilter;
 use riffy::endpoint::EndpointMatcher;
+use riffy::handler::router::{admin_router, create_router, AppState};
 use riffy::pipeline::consumer::Consumer;
-use riffy::proxy::handler::healthz;
-use riffy::proxy::router::{create_router, AppState};
 use riffy::proxy::UpstreamClient;
-use riffy::redis::RedisDiffStore;
+use riffy::storage::RedisDiffStore;
 use riffy::{config, pipeline, telemetry};
 use std::sync::Arc;
 
@@ -35,9 +34,8 @@ async fn main() -> anyhow::Result<()> {
     let (analysis_tx, analysis_rx) = pipeline::channel();
 
     let collector = Arc::new(InMemoryDifferenceCollector::new());
-    let matcher = Arc::new(EndpointMatcher::new(
-        cfg.endpoints.iter().map(|e| e.pattern.as_str()),
-    ));
+    let patterns: Vec<String> = cfg.endpoints.iter().map(|e| e.pattern.clone()).collect();
+    let matcher = Arc::new(EndpointMatcher::new(&patterns));
     let filter = DifferencesFilter::from_config(&cfg.threshold);
     let store = Arc::new(
         RedisDiffStore::connect(
@@ -87,13 +85,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %proxy_addr, "proxy server listening");
 
     // Admin server (healthz + metrics)
-    let admin_app = axum::Router::new()
-        .route("/healthz", axum::routing::get(healthz))
-        .route(
-            "/metrics",
-            axum::routing::get(telemetry::metrics::render_metrics),
-        )
-        .with_state(metrics_handle);
+    let admin_app = admin_router(metrics_handle);
     let admin_addr = format!("{}:{}", cfg.server.address, cfg.server.port);
     let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;
     tracing::info!(addr = %admin_addr, "admin server listening");

@@ -1,7 +1,7 @@
 use super::error::StoreError;
 use super::{DiffEntry, DiffStore, EndpointAggregation};
-use redis::aio::ConnectionManager;
-use redis::AsyncCommands;
+use ::redis::aio::ConnectionManager;
+use ::redis::AsyncCommands;
 
 /// Redis-backed `DiffStore`: per-request diffs go to a stream (`XADD`),
 /// aggregation snapshots to one hash per endpoint (`HSET`, pipelined).
@@ -18,7 +18,7 @@ impl RedisDiffStore {
         stream_key: String,
         aggregation_key_prefix: String,
     ) -> Result<Self, StoreError> {
-        let client = redis::Client::open(uri).map_err(StoreError::Redis)?;
+        let client = ::redis::Client::open(uri).map_err(StoreError::Redis)?;
         let conn = ConnectionManager::new(client)
             .await
             .map_err(StoreError::Redis)?;
@@ -31,6 +31,7 @@ impl RedisDiffStore {
     }
 }
 
+#[async_trait::async_trait]
 impl DiffStore for RedisDiffStore {
     async fn append_diff(&self, entry: &DiffEntry) -> Result<(), StoreError> {
         let raw_json = serde_json::to_string(&entry.raw_fields).map_err(StoreError::Serialize)?;
@@ -70,7 +71,7 @@ impl DiffStore for RedisDiffStore {
         }
 
         // One pipelined round-trip for all endpoints.
-        let mut pipe = redis::pipe();
+        let mut pipe = ::redis::pipe();
         for aggregation in aggregations {
             let fields_json =
                 serde_json::to_string(&aggregation.fields).map_err(StoreError::Serialize)?;

@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use crate::error::AppError;
+use crate::handler::router::AppState;
 use crate::pipeline::AnalysisMessage;
-use crate::proxy::router::AppState;
 use crate::telemetry::metrics::{ResolvedEndpoint, UpstreamTimer};
 use axum::body::Bytes;
 use axum::extract::State;
@@ -149,8 +149,4 @@ pub async fn proxy_handler(
     );
 
     Ok(client_response.into_response())
-}
-
-pub async fn healthz() -> axum::http::StatusCode {
-    axum::http::StatusCode::NO_CONTENT
 }

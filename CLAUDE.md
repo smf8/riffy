@@ -71,6 +71,7 @@ Every use of `.unwrap()` or `.expect()` in non-test code requires an explicit co
 
 ### Lints
 - All code is compiled with `-D warnings` and `-D clippy::all`. Zero warnings are allowed.
+- The single exception is `dead_code`: it is allowed globally via `-A dead_code` in `make lint` (R28). Never add per-item `#[allow(dead_code)]` attributes.
 - Run `make format` before `make lint`.
 
 ---

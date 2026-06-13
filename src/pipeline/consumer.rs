@@ -1,13 +1,17 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::decode::decode_body;
 use super::AnalysisMessage;
 use crate::analysis::filter::DifferencesFilter;
-use crate::analysis::{DifferenceAnalyzer, DifferenceCollector};
+use crate::analysis::DifferenceCollector;
+use crate::compare::flatten::{flatten_value, FlatDiff};
 use crate::endpoint::EndpointMatcher;
-use crate::redis::{DiffEntry, DiffStore, EndpointAggregation, FieldAggregation};
+use crate::proxy::upstream::UpstreamResponse;
+use crate::storage::{DiffEntry, DiffStore, EndpointAggregation, FieldAggregation};
 use chrono::Utc;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
@@ -15,33 +19,27 @@ use tokio::time::MissedTickBehavior;
 /// Single-task consumer of the analysis channel: resolves endpoints, diffs
 /// the response triplet, updates counters, appends per-request diff entries
 /// to the store and periodically snapshots aggregations.
-pub struct Consumer<C: DifferenceCollector, S: DiffStore> {
+pub struct Consumer {
     rx: mpsc::Receiver<AnalysisMessage>,
     matcher: Arc<EndpointMatcher>,
-    analyzer: DifferenceAnalyzer<C>,
-    collector: Arc<C>,
+    collector: Arc<dyn DifferenceCollector>,
     filter: DifferencesFilter,
-    store: Arc<S>,
+    store: Arc<dyn DiffStore>,
     aggregation_interval: Duration,
 }
 
-impl<C, S> Consumer<C, S>
-where
-    C: DifferenceCollector + 'static,
-    S: DiffStore + 'static,
-{
+impl Consumer {
     pub fn new(
         rx: mpsc::Receiver<AnalysisMessage>,
         matcher: Arc<EndpointMatcher>,
-        collector: Arc<C>,
+        collector: Arc<dyn DifferenceCollector>,
         filter: DifferencesFilter,
-        store: Arc<S>,
+        store: Arc<dyn DiffStore>,
         aggregation_interval: Duration,
     ) -> Self {
         Self {
             rx,
             matcher,
-            analyzer: DifferenceAnalyzer::new(collector.clone()),
             collector,
             filter,
             store,
@@ -74,54 +72,41 @@ where
 
     async fn handle(&self, msg: AnalysisMessage) {
         let endpoint = self.matcher.resolve(&msg.path);
+        let primary_status = msg.primary_response.status;
 
-        let Some(primary_body) = decode_body(&msg.primary_response).await else {
+        let Some(primary) = parse_json_body(&msg.primary_response).await else {
             tracing::warn!(
                 endpoint = %endpoint,
-                "skipping analysis: undecodable primary response body"
+                "skipping analysis: primary response body is not readable json"
             );
             return;
         };
 
-        let candidate_body = match &msg.candidate_response {
-            Some(response) => decode_body(response).await,
-            None => None,
-        };
-        let secondary_body = match &msg.secondary_response {
-            Some(response) => decode_body(response).await,
-            None => None,
-        };
+        // Statuses are checked before bodies: a body is only compared when
+        // its upstream answered with the same status as primary. A different
+        // status is itself the regression signal and is reported directly.
+        let raw_diffs = diff_against(&primary, primary_status, &msg.candidate_response).await;
+        let noise_diffs = diff_against(&primary, primary_status, &msg.secondary_response).await;
 
-        let analyzed = match self.analyzer.analyze(
-            &endpoint,
-            &primary_body,
-            candidate_body.as_deref(),
-            secondary_body.as_deref(),
-        ) {
-            Ok(analyzed) => analyzed,
-            Err(e) => {
-                tracing::debug!(endpoint = %endpoint, error = %e, "analysis skipped");
-                return;
-            }
-        };
+        self.collector.record(&endpoint, &raw_diffs, &noise_diffs);
 
         let candidate_status = msg.candidate_response.as_ref().map(|r| r.status);
         let secondary_status = msg.secondary_response.as_ref().map(|r| r.status);
 
-        let status_mismatch = candidate_status.is_some_and(|s| s != msg.primary_response.status)
-            || secondary_status.is_some_and(|s| s != msg.primary_response.status);
+        let status_mismatch = candidate_status.is_some_and(|s| s != primary_status)
+            || secondary_status.is_some_and(|s| s != primary_status);
 
         // Identical responses produce no entry — only counters (total) move.
-        if analyzed.raw_diffs.is_empty() && analyzed.noise_diffs.is_empty() && !status_mismatch {
+        if raw_diffs.is_empty() && noise_diffs.is_empty() && !status_mismatch {
             return;
         }
 
         let entry = DiffEntry {
             endpoint,
             timestamp: Utc::now(),
-            raw_fields: analyzed.raw_diffs,
-            noise_fields: analyzed.noise_diffs,
-            primary_status: msg.primary_response.status,
+            raw_fields: raw_diffs,
+            noise_fields: noise_diffs,
+            primary_status,
             candidate_status,
             secondary_status,
         };
@@ -172,6 +157,35 @@ where
 
         if let Err(e) = self.store.write_aggregation(&aggregations).await {
             tracing::warn!(error = %e, "failed to write aggregation snapshot");
+        }
+    }
+}
+
+/// Field-by-field diff of primary against one comparable upstream response.
+/// Empty when the upstream failed, answered with a different status, or its
+/// body is not readable JSON.
+async fn diff_against(
+    primary: &Value,
+    primary_status: u16,
+    response: &Option<UpstreamResponse>,
+) -> HashMap<String, FlatDiff> {
+    match response {
+        Some(r) if r.status == primary_status => match parse_json_body(r).await {
+            Some(other) => flatten_value(primary, &other),
+            None => HashMap::new(),
+        },
+        _ => HashMap::new(),
+    }
+}
+
+/// Decompress (when content-encoded) and JSON-parse a response body.
+async fn parse_json_body(response: &UpstreamResponse) -> Option<Value> {
+    let body = decode_body(response).await?;
+    match serde_json::from_slice(&body) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            tracing::debug!(error = %e, "skipping non-json body in analysis");
+            None
         }
     }
 }
