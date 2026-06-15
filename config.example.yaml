@@ -1,8 +1,4 @@
-riffy:
-  service-name: "my-service"
-
 proxy:
-  port: 8880
   allow-http-side-effects: false
 
 # Analysis pipeline tuning. Optional — omit to use the defaults shown.
@@ -11,39 +7,42 @@ pipeline:
   # consumer falls behind, the newest message is dropped with a warning
   # (backpressure by shedding, never unbounded queueing).
   channel-capacity: 1024
-  # Max per-request diff samples kept in the diff stream; oldest are trimmed
-  # past this (Redis XADD MAXLEN ~, in-memory drops the front).
-  stream-cap: 10000
 
 upstream:
-  baseline: "localhost:9100"
-  control: "localhost:9200"
-  candidate: "localhost:9000"
-  protocol: http
+  # The scheme is derived from the address; omit it to default to http://.
+  baseline: "http://localhost:9100"
+  control: "http://localhost:9200"
+  candidate: "http://localhost:9000"
   timeout: 30s
 
+# Each endpoint may carry its own thresholds; omit `threshold` for the diffy
+# defaults (relative 20%, absolute 0.03%).
 endpoints:
   - pattern: "/api/v1/users/:id"
+    threshold:
+      relative: 20.0
+      absolute: 0.03
   - pattern: "/api/v1/orders/:order_id/items/:item_id"
   - pattern: "/api/v1/health"
 
-threshold:
-  relative: 20.0
-  absolute: 0.03
-
-# Redis is optional. Omit this whole section to use the in-memory diff store
-# (no persistence across restarts) — useful for local development and tests.
-redis:
-  uri: "redis://localhost:6379"
-  stream-key: "riffy:diffs"
+# Storage for diffs and aggregation snapshots. `aggregation-interval` and
+# `stream-cap` apply to every backend; `backend` chooses where data lands.
+storage:
   # How often the in-memory counter buffer is flushed (raw counts only) to the
   # store. Short = near-current reads; the flush is cheap (one pipelined write).
   aggregation-interval: 1s
-  aggregation-key-prefix: "riffy:agg"
+  # Max per-request diff samples kept in the diff stream; oldest are trimmed
+  # past this (Redis XADD MAXLEN ~, in-memory drops the front).
+  stream-cap: 10000
+  backend:
+    # type: in-memory   # no persistence across restarts (default)
+    type: redis
+    uri: "redis://localhost:6379"
 
 server:
   address: "0.0.0.0"
-  port: 8888
+  proxy-port: 7677
+  admin-port: 7678
 
 logging:
   level: info

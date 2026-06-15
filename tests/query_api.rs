@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use chrono::Utc;
-use riffy::analysis::classify::RegressionClassifier;
+use riffy::analysis::classify::EndpointClassifiers;
 use riffy::analysis::counters::LiveCounters;
 use riffy::compare::flatten::{DiffType, FieldDiff};
 use riffy::http::router::{admin_router, AdminState};
@@ -20,7 +20,9 @@ async fn spawn_admin(store: Arc<dyn DiffStore>) -> SocketAddr {
     let state = AdminState {
         metrics: None,
         store,
-        classifier: RegressionClassifier::new(20.0, 0.03),
+        // No per-endpoint config in these tests → every endpoint uses the
+        // diffy-default classifier (relative 20%, absolute 0.03%).
+        classifiers: Arc::new(EndpointClassifiers::from_config(&[])),
         counters: Arc::new(LiveCounters::new()),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

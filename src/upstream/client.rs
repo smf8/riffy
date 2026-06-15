@@ -16,7 +16,6 @@ pub struct UpstreamClient {
     pub baseline: String,
     pub control: String,
     pub candidate: String,
-    pub protocol: String,
     pub timeout: Duration,
 }
 
@@ -30,13 +29,7 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 ];
 
 impl UpstreamClient {
-    pub fn new(
-        baseline: String,
-        control: String,
-        candidate: String,
-        protocol: String,
-        timeout: Duration,
-    ) -> Self {
+    pub fn new(baseline: String, control: String, candidate: String, timeout: Duration) -> Self {
         // Upstream targets are direct (in-cluster) services; never route them
         // through HTTP_PROXY/HTTPS_PROXY from the environment.
         let client = Client::builder()
@@ -51,7 +44,6 @@ impl UpstreamClient {
             baseline,
             control,
             candidate,
-            protocol,
             timeout,
         }
     }
@@ -67,7 +59,13 @@ impl UpstreamClient {
     ) -> Result<UpstreamResponse, UpstreamError> {
         tracing::Span::current().record("target", target);
 
-        let url = format!("{}://{}{}", self.protocol, target, path);
+        // The scheme is derived from the address: an explicit `http://` /
+        // `https://` prefix is honored, otherwise `http://` is assumed.
+        let url = if target.contains("://") {
+            format!("{target}{path}")
+        } else {
+            format!("http://{target}{path}")
+        };
 
         let mut builder = self.client.request(method.clone(), &url);
 

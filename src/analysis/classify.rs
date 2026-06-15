@@ -1,4 +1,6 @@
-use crate::config::Threshold;
+use std::collections::HashMap;
+
+use crate::config::{EndpointConfig, Threshold};
 use crate::storage::FieldAggregation;
 
 /// Threshold predicate classifying a field's stored counts as a real
@@ -26,5 +28,39 @@ impl RegressionClassifier {
         field.raw_count > field.noise_count
             && field.relative_difference() > self.relative_threshold
             && field.absolute_difference(endpoint_total) > self.absolute_threshold
+    }
+}
+
+/// Per-endpoint classifiers: each configured endpoint can carry its own
+/// thresholds, so the classifier used at read time is looked up by endpoint.
+/// Endpoints with no configured entry (e.g. unmatched raw paths) fall back to
+/// the diffy defaults.
+#[derive(Debug, Clone)]
+pub struct EndpointClassifiers {
+    per_endpoint: HashMap<String, RegressionClassifier>,
+    default: RegressionClassifier,
+}
+
+impl EndpointClassifiers {
+    pub fn from_config(endpoints: &[EndpointConfig]) -> Self {
+        let per_endpoint = endpoints
+            .iter()
+            .map(|e| {
+                (
+                    e.pattern.clone(),
+                    RegressionClassifier::from_config(&e.threshold),
+                )
+            })
+            .collect();
+        Self {
+            per_endpoint,
+            default: RegressionClassifier::from_config(&Threshold::default()),
+        }
+    }
+
+    /// The classifier configured for `endpoint`, or the diffy-default one when
+    /// the endpoint has no dedicated thresholds.
+    pub fn for_endpoint(&self, endpoint: &str) -> &RegressionClassifier {
+        self.per_endpoint.get(endpoint).unwrap_or(&self.default)
     }
 }

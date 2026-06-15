@@ -3,8 +3,9 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use anyhow::Context;
-use riffy::analysis::classify::RegressionClassifier;
+use riffy::analysis::classify::EndpointClassifiers;
 use riffy::analysis::counters::LiveCounters;
+use riffy::config::StorageBackend;
 use riffy::endpoint::EndpointMatcher;
 use riffy::http::router::{admin_router, create_router, AdminState, AppState};
 use riffy::pipeline::consumer::Consumer;
@@ -12,11 +13,6 @@ use riffy::storage::{DiffStore, InMemoryDiffStore, RedisDiffStore};
 use riffy::upstream::UpstreamClient;
 use riffy::{config, pipeline, telemetry};
 use std::sync::Arc;
-use std::time::Duration;
-
-/// Counter-buffer flush cadence used when Redis is not configured. Short: the
-/// flush only drains raw counts, so reads stay near-current at negligible cost.
-const DEFAULT_AGGREGATION_INTERVAL: Duration = Duration::from_secs(1);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,14 +20,13 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::load()?;
     telemetry::init_tracing(&cfg.logging);
 
-    tracing::info!(service = %cfg.service_name, "starting riffy");
+    tracing::info!(service = riffy::SERVICE_NAME, "starting riffy");
 
     // Upstream client
     let upstream = UpstreamClient::new(
         cfg.upstream.baseline.clone(),
         cfg.upstream.control.clone(),
         cfg.upstream.candidate.clone(),
-        cfg.upstream.protocol.clone(),
         cfg.upstream.timeout,
     );
 
@@ -41,29 +36,21 @@ async fn main() -> anyhow::Result<()> {
     let collector = Arc::new(LiveCounters::new());
     let patterns: Vec<String> = cfg.endpoints.iter().map(|e| e.pattern.clone()).collect();
     let matcher = Arc::new(EndpointMatcher::new(&patterns));
-    let filter = RegressionClassifier::from_config(&cfg.threshold);
+    let classifiers = Arc::new(EndpointClassifiers::from_config(&cfg.endpoints));
 
-    // Redis is opt-in: with no redis config we fall back to the in-memory
-    // store (no persistence). The store is shared between the consumer (writer)
-    // and the admin query API (reader).
-    let (store, aggregation_interval): (Arc<dyn DiffStore>, Duration) = match &cfg.redis {
-        Some(redis) => {
-            let store = RedisDiffStore::connect(
-                &redis.uri,
-                redis.stream_key.clone(),
-                redis.aggregation_key_prefix.clone(),
-                cfg.pipeline.stream_cap,
-            )
-            .await
-            .context("failed to connect to redis")?;
-            (Arc::new(store), redis.aggregation_interval)
+    // The store is shared between the consumer (writer) and the admin query API
+    // (reader). Both backends share the aggregation interval and stream cap.
+    let aggregation_interval = cfg.storage.aggregation_interval;
+    let store: Arc<dyn DiffStore> = match &cfg.storage.backend {
+        StorageBackend::Redis { uri } => {
+            let store = RedisDiffStore::connect(uri, cfg.storage.stream_cap)
+                .await
+                .context("failed to connect to redis")?;
+            Arc::new(store)
         }
-        None => {
-            tracing::info!("redis not configured; using in-memory diff store");
-            (
-                Arc::new(InMemoryDiffStore::with_capacity(cfg.pipeline.stream_cap)),
-                DEFAULT_AGGREGATION_INTERVAL,
-            )
+        StorageBackend::InMemory => {
+            tracing::info!("using in-memory diff store (no persistence)");
+            Arc::new(InMemoryDiffStore::with_capacity(cfg.storage.stream_cap))
         }
     };
 
@@ -98,20 +85,21 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Proxy server
-    let proxy_addr = format!("0.0.0.0:{}", cfg.proxy.port);
+    let proxy_addr = format!("{}:{}", cfg.server.address, cfg.server.proxy_port);
     let proxy_app = create_router(state);
     let proxy_listener = tokio::net::TcpListener::bind(&proxy_addr).await?;
     tracing::info!(addr = %proxy_addr, "proxy server listening");
 
     // Admin server (healthz + metrics + diff query API). The query API applies
-    // `filter` at read time to classify regressions from the stored raw counts.
+    // the per-endpoint classifiers at read time to derive regressions from the
+    // stored raw counts.
     let admin_app = admin_router(AdminState {
         metrics: metrics_handle,
         store,
-        classifier: filter,
+        classifiers,
         counters: collector,
     });
-    let admin_addr = format!("{}:{}", cfg.server.address, cfg.server.port);
+    let admin_addr = format!("{}:{}", cfg.server.address, cfg.server.admin_port);
     let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;
     tracing::info!(addr = %admin_addr, "admin server listening");
 

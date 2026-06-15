@@ -1,3 +1,7 @@
+/// Application name — used for log/trace identification and as the prefix of
+/// the Redis key constants in `storage`.
+pub const SERVICE_NAME: &str = "riffy";
+
 pub mod analysis;
 pub mod compare;
 pub mod config;

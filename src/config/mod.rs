@@ -8,26 +8,27 @@ mod tests;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Riffy {
-    pub service_name: String,
+    #[serde(default)]
     pub proxy: Proxy,
     #[serde(default)]
     pub pipeline: Pipeline,
     pub upstream: Upstream,
-    pub threshold: Threshold,
-    pub endpoints: Vec<EndpointPattern>,
-    /// Redis is opt-in: when this section is absent the diff store falls back
-    /// to an in-memory implementation (no persistence across restarts).
+    /// Endpoints to analyze; each carries its own regression thresholds
+    /// (defaulting to the diffy values when omitted).
+    pub endpoints: Vec<EndpointConfig>,
     #[serde(default)]
-    pub redis: Option<RedisConfig>,
+    pub storage: Storage,
+    #[serde(default)]
     pub server: Server,
+    #[serde(default)]
     pub logging: Logging,
+    #[serde(default)]
     pub metrics: Metrics,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Proxy {
-    pub port: u16,
     #[serde(default)]
     pub allow_http_side_effects: bool,
 }
@@ -40,26 +41,16 @@ pub struct Pipeline {
     /// (backpressure by shedding, never unbounded queueing).
     #[serde(default = "default_channel_capacity")]
     pub channel_capacity: usize,
-    /// Maximum number of per-request diff samples retained in the diff stream.
-    /// The oldest samples are trimmed once the cap is exceeded — Redis via
-    /// `XADD MAXLEN ~`, the in-memory store by dropping the front.
-    #[serde(default = "default_stream_cap")]
-    pub stream_cap: usize,
 }
 
 fn default_channel_capacity() -> usize {
     1024
 }
 
-fn default_stream_cap() -> usize {
-    10_000
-}
-
 impl Default for Pipeline {
     fn default() -> Self {
         Self {
             channel_capacity: default_channel_capacity(),
-            stream_cap: default_stream_cap(),
         }
     }
 }
@@ -67,24 +58,22 @@ impl Default for Pipeline {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Upstream {
+    /// Upstream addresses; the scheme is derived from the address itself
+    /// (e.g. `https://host:port`), defaulting to `http://` when none is given.
     pub baseline: String,
     pub control: String,
     pub candidate: String,
-    #[serde(default = "default_protocol")]
-    pub protocol: String,
     #[serde(default = "default_timeout", with = "humantime_serde")]
     pub timeout: Duration,
-}
-
-fn default_protocol() -> String {
-    "http".to_string()
 }
 
 fn default_timeout() -> Duration {
     Duration::from_secs(30)
 }
 
-#[derive(Debug, Deserialize)]
+/// Per-field regression thresholds (diffy's noise filter). Defaults are the
+/// diffy values: 20% relative, 0.03% absolute.
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Threshold {
     #[serde(default = "default_relative_threshold")]
@@ -101,41 +90,99 @@ fn default_absolute_threshold() -> f64 {
     0.03
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct EndpointPattern {
-    pub pattern: String,
+impl Default for Threshold {
+    fn default() -> Self {
+        Self {
+            relative: default_relative_threshold(),
+            absolute: default_absolute_threshold(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub struct RedisConfig {
-    pub uri: String,
-    #[serde(default = "default_stream_key")]
-    pub stream_key: String,
+pub struct EndpointConfig {
+    pub pattern: String,
+    /// Per-endpoint regression thresholds; omitted → diffy defaults.
+    #[serde(default)]
+    pub threshold: Threshold,
+}
+
+/// Storage for diffs and aggregation snapshots. `aggregation-interval` and
+/// `stream-cap` are common to every backend (they govern flush cadence and
+/// sample retention regardless of where data lands); `backend` selects between
+/// Redis and the in-memory store.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Storage {
     #[serde(default = "default_aggregation_interval", with = "humantime_serde")]
     pub aggregation_interval: Duration,
-    #[serde(default = "default_agg_prefix")]
-    pub aggregation_key_prefix: String,
+    #[serde(default = "default_stream_cap")]
+    pub stream_cap: usize,
+    #[serde(default)]
+    pub backend: StorageBackend,
 }
 
-fn default_stream_key() -> String {
-    "riffy:diffs".to_string()
+#[derive(Debug, Deserialize, Default)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum StorageBackend {
+    /// In-memory store (no persistence across restarts) — the default.
+    #[default]
+    InMemory,
+    /// Redis-backed store. Stream and aggregation keys are fixed constants
+    /// (`storage::DIFF_STREAM_KEY` / `storage::AGGREGATION_KEY_PREFIX`).
+    Redis { uri: String },
 }
 
 fn default_aggregation_interval() -> Duration {
     Duration::from_secs(1)
 }
 
-fn default_agg_prefix() -> String {
-    "riffy:agg".to_string()
+fn default_stream_cap() -> usize {
+    10_000
+}
+
+impl Default for Storage {
+    fn default() -> Self {
+        Self {
+            aggregation_interval: default_aggregation_interval(),
+            stream_cap: default_stream_cap(),
+            backend: StorageBackend::default(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Server {
+    #[serde(default = "default_address")]
     pub address: String,
-    pub port: u16,
+    #[serde(default = "default_proxy_port")]
+    pub proxy_port: u16,
+    #[serde(default = "default_admin_port")]
+    pub admin_port: u16,
+}
+
+fn default_address() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_proxy_port() -> u16 {
+    7677
+}
+
+fn default_admin_port() -> u16 {
+    7678
+}
+
+impl Default for Server {
+    fn default() -> Self {
+        Self {
+            address: default_address(),
+            proxy_port: default_proxy_port(),
+            admin_port: default_admin_port(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +194,14 @@ pub struct Logging {
 
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+impl Default for Logging {
+    fn default() -> Self {
+        Self {
+            level: default_log_level(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,10 +221,19 @@ fn default_true() -> bool {
     true
 }
 
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            port: default_metrics_port(),
+        }
+    }
+}
+
 pub fn load() -> anyhow::Result<Riffy> {
     // Layered: the example file is the base, an optional `config.yaml` overrides
     // it, and `RIFFY_`-prefixed env vars override both. Nested keys use a `__`
-    // separator (e.g. `RIFFY_SERVER__PORT` → `server.port`).
+    // separator (e.g. `RIFFY_SERVER__PROXY_PORT` → `server.proxy-port`).
     let config: Riffy = Config::builder()
         .add_source(File::new("config.example", FileFormat::Yaml).required(false))
         .add_source(File::new("config", FileFormat::Yaml).required(false))
@@ -185,11 +249,6 @@ impl Riffy {
     pub fn validate(&self) -> anyhow::Result<()> {
         use anyhow::ensure;
 
-        ensure!(
-            !self.service_name.trim().is_empty(),
-            "riffy.service-name must not be empty"
-        );
-
         for (role, host) in [
             ("baseline", &self.upstream.baseline),
             ("control", &self.upstream.control),
@@ -198,42 +257,41 @@ impl Riffy {
             ensure!(!host.trim().is_empty(), "upstream.{role} must not be empty");
         }
 
-        ensure!(
-            matches!(self.upstream.protocol.as_str(), "http" | "https"),
-            "upstream.protocol must be http or https, got '{}'",
-            self.upstream.protocol
-        );
-
         for endpoint in &self.endpoints {
             ensure!(
                 endpoint.pattern.starts_with('/'),
                 "endpoint pattern '{}' must start with '/'",
                 endpoint.pattern
             );
+            ensure!(
+                endpoint.threshold.relative >= 0.0,
+                "endpoint '{}' threshold.relative must be >= 0",
+                endpoint.pattern
+            );
+            ensure!(
+                endpoint.threshold.absolute >= 0.0,
+                "endpoint '{}' threshold.absolute must be >= 0",
+                endpoint.pattern
+            );
         }
 
         ensure!(
-            self.threshold.relative >= 0.0,
-            "threshold.relative must be >= 0"
-        );
-        ensure!(
-            self.threshold.absolute >= 0.0,
-            "threshold.absolute must be >= 0"
-        );
-        ensure!(
-            self.proxy.port != self.server.port,
-            "proxy.port and server.port must differ"
+            self.server.proxy_port != self.server.admin_port,
+            "server.proxy-port and server.admin-port must differ"
         );
         ensure!(
             self.pipeline.channel_capacity > 0,
             "pipeline.channel-capacity must be > 0"
         );
         ensure!(
-            self.pipeline.stream_cap > 0,
-            "pipeline.stream-cap must be > 0"
+            self.storage.stream_cap > 0,
+            "storage.stream-cap must be > 0"
         );
-        if let Some(redis) = &self.redis {
-            ensure!(!redis.uri.trim().is_empty(), "redis.uri must not be empty");
+        if let StorageBackend::Redis { uri } = &self.storage.backend {
+            ensure!(
+                !uri.trim().is_empty(),
+                "storage.backend.uri must not be empty"
+            );
         }
 
         Ok(())

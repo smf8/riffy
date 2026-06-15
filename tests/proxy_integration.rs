@@ -11,7 +11,8 @@ use axum::routing::any;
 use axum::{Json, Router};
 use riffy::analysis::counters::LiveCounters;
 use riffy::config::{
-    EndpointPattern, Logging, Metrics, Pipeline, Proxy, Riffy, Server, Threshold, Upstream,
+    EndpointConfig, Logging, Metrics, Pipeline, Proxy, Riffy, Server, Storage, StorageBackend,
+    Threshold, Upstream,
 };
 use riffy::endpoint::EndpointMatcher;
 use riffy::http::router::{create_router, AppState};
@@ -34,35 +35,35 @@ async fn spawn_json_upstream(body: Value) -> SocketAddr {
 
 fn test_config() -> Riffy {
     Riffy {
-        service_name: "riffy-test".to_owned(),
         proxy: Proxy {
-            port: 0,
             allow_http_side_effects: false,
         },
         pipeline: Pipeline {
             channel_capacity: 1024,
-            stream_cap: 10_000,
         },
         upstream: Upstream {
             baseline: String::new(),
             control: String::new(),
             candidate: String::new(),
-            protocol: "http".to_owned(),
             timeout: Duration::from_secs(5),
         },
-        threshold: Threshold {
-            relative: 20.0,
-            absolute: 0.03,
-        },
-        endpoints: vec![EndpointPattern {
+        endpoints: vec![EndpointConfig {
             pattern: "/api/v1/users/:id".to_owned(),
+            threshold: Threshold {
+                relative: 20.0,
+                absolute: 0.03,
+            },
         }],
-        // The proxy integration test drives the in-memory store directly, so
-        // the config needs no redis section.
-        redis: None,
+        // The proxy integration test drives the in-memory store directly.
+        storage: Storage {
+            aggregation_interval: Duration::from_secs(1),
+            stream_cap: 10_000,
+            backend: StorageBackend::InMemory,
+        },
         server: Server {
             address: "127.0.0.1".to_owned(),
-            port: 1,
+            proxy_port: 1,
+            admin_port: 2,
         },
         logging: Logging {
             level: "info".to_owned(),
@@ -90,7 +91,6 @@ async fn spawn_proxy(
         baseline.to_string(),
         control.to_string(),
         candidate.to_string(),
-        "http".to_owned(),
         Duration::from_secs(5),
     );
 

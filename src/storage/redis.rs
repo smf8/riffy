@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::error::StoreError;
-use super::{DiffEntry, DiffSample, DiffStore, EndpointAggregation, FieldAggregation, SamplePage};
+use super::{
+    DiffEntry, DiffSample, DiffStore, EndpointAggregation, FieldAggregation, SamplePage,
+    AGGREGATION_KEY_PREFIX, DIFF_STREAM_KEY,
+};
 use crate::compare::flatten::FieldDiff;
 use chrono::{DateTime, Utc};
 use redis::aio::ConnectionManager;
@@ -12,31 +15,21 @@ use redis::{from_redis_value, AsyncCommands, Value};
 /// aggregation snapshots to one hash per endpoint (`HSET`, pipelined).
 pub struct RedisDiffStore {
     conn: ConnectionManager,
-    stream_key: String,
-    aggregation_key_prefix: String,
     /// Approximate cap on the diff stream length (`XADD MAXLEN ~`).
     stream_cap: usize,
 }
 
 impl RedisDiffStore {
-    /// Connect with an auto-reconnecting multiplexed connection.
-    pub async fn connect(
-        uri: &str,
-        stream_key: String,
-        aggregation_key_prefix: String,
-        stream_cap: usize,
-    ) -> Result<Self, StoreError> {
+    /// Connect with an auto-reconnecting multiplexed connection. The stream and
+    /// aggregation keys are fixed constants (`DIFF_STREAM_KEY` /
+    /// `AGGREGATION_KEY_PREFIX`), not configuration.
+    pub async fn connect(uri: &str, stream_cap: usize) -> Result<Self, StoreError> {
         let client = redis::Client::open(uri).map_err(StoreError::Redis)?;
         let conn = ConnectionManager::new(client)
             .await
             .map_err(StoreError::Redis)?;
 
-        Ok(Self {
-            conn,
-            stream_key,
-            aggregation_key_prefix,
-            stream_cap,
-        })
+        Ok(Self { conn, stream_cap })
     }
 }
 
@@ -67,7 +60,7 @@ impl DiffStore for RedisDiffStore {
         let mut conn = self.conn.clone();
         let _id: String = conn
             .xadd_maxlen(
-                &self.stream_key,
+                DIFF_STREAM_KEY,
                 StreamMaxlen::Approx(self.stream_cap),
                 "*",
                 &fields,
@@ -91,7 +84,7 @@ impl DiffStore for RedisDiffStore {
         let mut pipe = redis::pipe();
         pipe.atomic();
         for delta in deltas {
-            let key = format!("{}:{}", self.aggregation_key_prefix, delta.endpoint);
+            let key = format!("{}:{}", AGGREGATION_KEY_PREFIX, delta.endpoint);
             if delta.total > 0 {
                 pipe.hincr(&key, "total", delta.total).ignore();
             }
@@ -122,7 +115,7 @@ impl DiffStore for RedisDiffStore {
         &self,
         endpoint: &str,
     ) -> Result<Option<EndpointAggregation>, StoreError> {
-        let key = format!("{}:{}", self.aggregation_key_prefix, endpoint);
+        let key = format!("{}:{}", AGGREGATION_KEY_PREFIX, endpoint);
         let mut conn = self.conn.clone();
         let map: HashMap<String, String> = conn.hgetall(&key).await.map_err(StoreError::Redis)?;
         if map.is_empty() {
@@ -133,7 +126,7 @@ impl DiffStore for RedisDiffStore {
 
     async fn list_aggregations(&self) -> Result<Vec<EndpointAggregation>, StoreError> {
         let mut conn = self.conn.clone();
-        let prefix = format!("{}:", self.aggregation_key_prefix);
+        let prefix = format!("{}:", AGGREGATION_KEY_PREFIX);
         let pattern = format!("{prefix}*");
 
         // Cursor-based SCAN instead of KEYS so a large keyspace never blocks
@@ -184,7 +177,7 @@ impl DiffStore for RedisDiffStore {
     }
 
     async fn reset_aggregation(&self, endpoint: &str) -> Result<(), StoreError> {
-        let key = format!("{}:{}", self.aggregation_key_prefix, endpoint);
+        let key = format!("{}:{}", AGGREGATION_KEY_PREFIX, endpoint);
         let mut conn = self.conn.clone();
         let _: () = conn.del(&key).await.map_err(StoreError::Redis)?;
         Ok(())
@@ -208,7 +201,7 @@ impl DiffStore for RedisDiffStore {
 
         loop {
             let reply: StreamRangeReply = conn
-                .xrevrange_count(self.stream_key.as_str(), end.as_str(), "-", PAGE)
+                .xrevrange_count(DIFF_STREAM_KEY, end.as_str(), "-", PAGE)
                 .await
                 .map_err(StoreError::Redis)?;
             if reply.ids.is_empty() {

@@ -16,6 +16,12 @@ pub use redis::RedisDiffStore;
 
 use error::StoreError;
 
+/// Redis key for the per-request diff stream (`{app}:{resource}:{type}`).
+pub const DIFF_STREAM_KEY: &str = "riffy:diffs";
+/// Redis key prefix for per-endpoint aggregation hashes; the endpoint is
+/// appended as `riffy:agg:{endpoint}`.
+pub const AGGREGATION_KEY_PREFIX: &str = "riffy:agg";
+
 /// One per-request diff record, destined for the Redis stream.
 #[derive(Debug, Clone)]
 pub struct DiffEntry {

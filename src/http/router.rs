@@ -1,5 +1,5 @@
 use super::{forward, query};
-use crate::analysis::classify::RegressionClassifier;
+use crate::analysis::classify::EndpointClassifiers;
 use crate::analysis::counters::LiveCounters;
 use crate::config::Riffy;
 use crate::endpoint::EndpointMatcher;
@@ -38,7 +38,7 @@ pub fn create_router(state: AppState) -> Router {
 pub struct AdminState {
     pub metrics: Option<PrometheusHandle>,
     pub store: Arc<dyn DiffStore>,
-    pub classifier: RegressionClassifier,
+    pub classifiers: Arc<EndpointClassifiers>,
     pub counters: Arc<LiveCounters>,
 }
 
@@ -54,9 +54,9 @@ impl FromRef<AdminState> for Arc<dyn DiffStore> {
     }
 }
 
-impl FromRef<AdminState> for RegressionClassifier {
+impl FromRef<AdminState> for Arc<EndpointClassifiers> {
     fn from_ref(state: &AdminState) -> Self {
-        state.classifier
+        state.classifiers.clone()
     }
 }
 

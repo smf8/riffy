@@ -3,38 +3,36 @@ use std::time::Duration;
 
 fn valid_config() -> Riffy {
     Riffy {
-        service_name: "test-service".to_owned(),
         proxy: Proxy {
-            port: 8880,
             allow_http_side_effects: false,
         },
         pipeline: Pipeline {
             channel_capacity: 1024,
-            stream_cap: 10_000,
         },
         upstream: Upstream {
-            baseline: "localhost:9100".to_owned(),
-            control: "localhost:9200".to_owned(),
-            candidate: "localhost:9000".to_owned(),
-            protocol: "http".to_owned(),
+            baseline: "http://localhost:9100".to_owned(),
+            control: "http://localhost:9200".to_owned(),
+            candidate: "http://localhost:9000".to_owned(),
             timeout: Duration::from_secs(30),
         },
-        threshold: Threshold {
-            relative: 20.0,
-            absolute: 0.03,
-        },
-        endpoints: vec![EndpointPattern {
+        endpoints: vec![EndpointConfig {
             pattern: "/api/v1/users/:id".to_owned(),
+            threshold: Threshold {
+                relative: 20.0,
+                absolute: 0.03,
+            },
         }],
-        redis: Some(RedisConfig {
-            uri: "redis://localhost:6379".to_owned(),
-            stream_key: "riffy:diffs".to_owned(),
-            aggregation_interval: Duration::from_secs(10),
-            aggregation_key_prefix: "riffy:agg".to_owned(),
-        }),
+        storage: Storage {
+            aggregation_interval: Duration::from_secs(1),
+            stream_cap: 10_000,
+            backend: StorageBackend::Redis {
+                uri: "redis://localhost:6379".to_owned(),
+            },
+        },
         server: Server {
             address: "0.0.0.0".to_owned(),
-            port: 8888,
+            proxy_port: 7677,
+            admin_port: 7678,
         },
         logging: Logging {
             level: "info".to_owned(),
@@ -52,23 +50,9 @@ fn valid_config_passes() {
 }
 
 #[test]
-fn empty_service_name_fails() {
-    let mut cfg = valid_config();
-    cfg.service_name = "  ".to_owned();
-    assert!(cfg.validate().is_err());
-}
-
-#[test]
 fn empty_upstream_fails() {
     let mut cfg = valid_config();
     cfg.upstream.candidate = String::new();
-    assert!(cfg.validate().is_err());
-}
-
-#[test]
-fn invalid_protocol_fails() {
-    let mut cfg = valid_config();
-    cfg.upstream.protocol = "ftp".to_owned();
     assert!(cfg.validate().is_err());
 }
 
@@ -80,30 +64,30 @@ fn pattern_without_leading_slash_fails() {
 }
 
 #[test]
-fn negative_threshold_fails() {
+fn negative_endpoint_threshold_fails() {
     let mut cfg = valid_config();
-    cfg.threshold.relative = -1.0;
+    cfg.endpoints[0].threshold.relative = -1.0;
     assert!(cfg.validate().is_err());
 }
 
 #[test]
 fn conflicting_ports_fail() {
     let mut cfg = valid_config();
-    cfg.server.port = cfg.proxy.port;
+    cfg.server.admin_port = cfg.server.proxy_port;
     assert!(cfg.validate().is_err());
 }
 
 #[test]
 fn empty_redis_uri_fails() {
     let mut cfg = valid_config();
-    cfg.redis.as_mut().unwrap().uri = String::new();
+    cfg.storage.backend = StorageBackend::Redis { uri: String::new() };
     assert!(cfg.validate().is_err());
 }
 
 #[test]
-fn absent_redis_section_is_valid() {
+fn in_memory_backend_is_valid() {
     let mut cfg = valid_config();
-    cfg.redis = None;
+    cfg.storage.backend = StorageBackend::InMemory;
     assert!(cfg.validate().is_ok());
 }
 
@@ -117,6 +101,6 @@ fn zero_channel_capacity_fails() {
 #[test]
 fn zero_stream_cap_fails() {
     let mut cfg = valid_config();
-    cfg.pipeline.stream_cap = 0;
+    cfg.storage.stream_cap = 0;
     assert!(cfg.validate().is_err());
 }

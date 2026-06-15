@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::analysis::classify::RegressionClassifier;
+use crate::analysis::classify::EndpointClassifiers;
 use crate::analysis::counters::LiveCounters;
 use crate::error::AppError;
 use crate::storage::{DiffStore, EndpointAggregation, FieldAggregation, SamplePage};
@@ -98,7 +98,7 @@ pub struct DiffDetail {
 /// plus a paginated, newest-first list of the actual diff samples at that path.
 pub async fn diff_detail(
     State(store): State<Arc<dyn DiffStore>>,
-    State(classifier): State<RegressionClassifier>,
+    State(classifiers): State<Arc<EndpointClassifiers>>,
     Query(query): Query<DetailQuery>,
 ) -> Result<Response, AppError> {
     let limit = query
@@ -138,6 +138,7 @@ pub async fn diff_detail(
         raw_count,
         noise_count,
     };
+    let classifier = classifiers.for_endpoint(&query.endpoint);
     let is_regression = classifier.is_regression(&counts, total);
 
     Ok(Json(DiffDetail {
