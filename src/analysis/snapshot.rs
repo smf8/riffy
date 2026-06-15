@@ -1,7 +1,7 @@
-/// Per-field join of the raw (primary vs candidate) and noise (primary vs
-/// secondary) counters for one endpoint.
+/// Per-field join of the raw (baseline vs candidate) and noise (baseline vs
+/// control) counters for one endpoint.
 #[derive(Debug, Clone)]
-pub struct JoinedField {
+pub struct FieldSnapshot {
     pub path: String,
     pub raw_count: u64,
     pub noise_count: u64,
@@ -9,7 +9,7 @@ pub struct JoinedField {
     pub endpoint_total: u64,
 }
 
-impl JoinedField {
+impl FieldSnapshot {
     /// `|raw − noise| / (raw + noise) × 100`. Zero when both counters are zero.
     pub fn relative_difference(&self) -> f64 {
         let raw = self.raw_count as f64;
@@ -31,8 +31,8 @@ impl JoinedField {
 }
 
 #[derive(Debug, Clone)]
-pub struct JoinedEndpoint {
+pub struct EndpointSnapshot {
     pub endpoint: String,
     pub total: u64,
-    pub fields: Vec<JoinedField>,
+    pub fields: Vec<FieldSnapshot>,
 }

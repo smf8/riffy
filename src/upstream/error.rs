@@ -3,7 +3,7 @@ use thiserror::Error;
 
 /// Errors from upstream proxy operations.
 #[derive(Debug, Error)]
-pub enum ProxyError {
+pub enum UpstreamError {
     #[error("upstream {target} timeout: {source}")]
     Timeout {
         target: String,
@@ -19,7 +19,7 @@ pub enum ProxyError {
     },
 }
 
-impl ProxyError {
+impl UpstreamError {
     pub fn timeout(target: impl Into<String>, source: reqwest::Error) -> Self {
         Self::Timeout {
             target: target.into(),
@@ -36,8 +36,8 @@ impl ProxyError {
 
     pub fn status_code(&self) -> StatusCode {
         match self {
-            ProxyError::Timeout { .. } => StatusCode::GATEWAY_TIMEOUT,
-            ProxyError::Connection { .. } => StatusCode::BAD_GATEWAY,
+            UpstreamError::Timeout { .. } => StatusCode::GATEWAY_TIMEOUT,
+            UpstreamError::Connection { .. } => StatusCode::BAD_GATEWAY,
         }
     }
 }

@@ -1,9 +1,10 @@
+use crate::analysis::classify::RegressionClassifier;
 use crate::config::Riffy;
 use crate::endpoint::EndpointMatcher;
 use crate::pipeline::AnalysisMessage;
-use crate::proxy::upstream::UpstreamClient;
 use crate::storage::DiffStore;
 use crate::telemetry::metrics::{render_metrics, track_proxy};
+use crate::upstream::client::UpstreamClient;
 use axum::extract::FromRef;
 use axum::routing::{any, get};
 use axum::{middleware, Router};
@@ -11,7 +12,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use super::{proxy, query};
+use super::{forward, query};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -21,21 +22,23 @@ pub struct AppState {
     pub matcher: Arc<EndpointMatcher>,
 }
 
-/// Client-facing router: every path falls through to the proxy handler.
+/// Client-facing router: every path falls through to the forwarding handler.
 pub fn create_router(state: AppState) -> Router {
     Router::new()
-        .fallback(any(proxy::proxy_handler))
+        .fallback(any(forward::forward))
         .layer(middleware::from_fn_with_state(state.clone(), track_proxy))
         .with_state(state)
 }
 
-/// Shared state for the admin server: the optional Prometheus handle and the
-/// diff store backing the read API. `FromRef` lets each handler extract only
-/// the substate it needs.
+/// Shared state for the admin server: the optional Prometheus handle, the diff
+/// store backing the read API, and the classifier used to derive regression
+/// verdicts from stored raw counts at read time. `FromRef` lets each handler
+/// extract only the substate it needs.
 #[derive(Clone)]
 pub struct AdminState {
     pub metrics: Option<PrometheusHandle>,
     pub store: Arc<dyn DiffStore>,
+    pub classifier: RegressionClassifier,
 }
 
 impl FromRef<AdminState> for Option<PrometheusHandle> {
@@ -47,6 +50,12 @@ impl FromRef<AdminState> for Option<PrometheusHandle> {
 impl FromRef<AdminState> for Arc<dyn DiffStore> {
     fn from_ref(state: &AdminState) -> Self {
         state.store.clone()
+    }
+}
+
+impl FromRef<AdminState> for RegressionClassifier {
+    fn from_ref(state: &AdminState) -> Self {
+        state.classifier
     }
 }
 

@@ -1,5 +1,5 @@
 //! End-to-end test: three mock upstreams behind the riffy proxy, verifying
-//! the client always receives the primary response and the analysis pipeline
+//! the client always receives the baseline response and the analysis pipeline
 //! records diffs through the `DiffStore` boundary.
 
 use std::future::IntoFuture;
@@ -9,14 +9,13 @@ use std::time::Duration;
 
 use axum::routing::any;
 use axum::{Json, Router};
-use riffy::analysis::collector::InMemoryDifferenceCollector;
-use riffy::analysis::filter::DifferencesFilter;
+use riffy::analysis::counters::LiveCounters;
 use riffy::config::{EndpointPattern, Logging, Metrics, Proxy, Riffy, Server, Threshold, Upstream};
 use riffy::endpoint::EndpointMatcher;
-use riffy::handler::router::{create_router, AppState};
+use riffy::http::router::{create_router, AppState};
 use riffy::pipeline::consumer::Consumer;
-use riffy::proxy::UpstreamClient;
 use riffy::storage::{DiffEntry, InMemoryDiffStore};
+use riffy::upstream::UpstreamClient;
 use serde_json::{json, Value};
 
 async fn spawn_json_upstream(body: Value) -> SocketAddr {
@@ -39,8 +38,8 @@ fn test_config() -> Riffy {
             allow_http_side_effects: false,
         },
         upstream: Upstream {
-            primary: String::new(),
-            secondary: String::new(),
+            baseline: String::new(),
+            control: String::new(),
             candidate: String::new(),
             protocol: "http".to_owned(),
             timeout: Duration::from_secs(5),
@@ -77,20 +76,20 @@ struct TestProxy {
 /// Boot the full stack — proxy router + analysis consumer — against the given
 /// upstream addresses, with an in-memory store standing in for Redis.
 async fn spawn_proxy(
-    primary: SocketAddr,
-    secondary: SocketAddr,
+    baseline: SocketAddr,
+    control: SocketAddr,
     candidate: SocketAddr,
 ) -> TestProxy {
     let upstream = UpstreamClient::new(
-        primary.to_string(),
-        secondary.to_string(),
+        baseline.to_string(),
+        control.to_string(),
         candidate.to_string(),
         "http".to_owned(),
         Duration::from_secs(5),
     );
 
     let (analysis_tx, analysis_rx) = riffy::pipeline::channel();
-    let collector = Arc::new(InMemoryDifferenceCollector::new());
+    let collector = Arc::new(LiveCounters::new());
     let store = Arc::new(InMemoryDiffStore::new());
     let matcher = Arc::new(EndpointMatcher::new(&["/api/v1/users/:id".to_owned()]));
 
@@ -98,7 +97,6 @@ async fn spawn_proxy(
         analysis_rx,
         matcher.clone(),
         collector,
-        DifferencesFilter::new(20.0, 0.03),
         store.clone(),
         Duration::from_secs(3600),
     )
@@ -137,13 +135,13 @@ async fn wait_for_entries(store: &InMemoryDiffStore) -> Vec<DiffEntry> {
 }
 
 #[tokio::test]
-async fn client_gets_primary_response_and_diffs_are_recorded() {
-    let primary_body = json!({"name": "alice", "version": 1});
-    let primary = spawn_json_upstream(primary_body.clone()).await;
-    let secondary = spawn_json_upstream(json!({"name": "alice", "version": 1})).await;
+async fn client_gets_baseline_response_and_diffs_are_recorded() {
+    let baseline_body = json!({"name": "alice", "version": 1});
+    let baseline = spawn_json_upstream(baseline_body.clone()).await;
+    let control = spawn_json_upstream(json!({"name": "alice", "version": 1})).await;
     let candidate = spawn_json_upstream(json!({"name": "bob", "version": 1})).await;
 
-    let proxy = spawn_proxy(primary, secondary, candidate).await;
+    let proxy = spawn_proxy(baseline, control, candidate).await;
 
     let response = http_client()
         .get(format!("http://{}/api/v1/users/42", proxy.addr))
@@ -152,9 +150,9 @@ async fn client_gets_primary_response_and_diffs_are_recorded() {
         .unwrap();
     assert_eq!(response.status(), 200);
 
-    // Client must always see the primary response.
+    // Client must always see the baseline response.
     let body: Value = response.json().await.unwrap();
-    assert_eq!(body, primary_body);
+    assert_eq!(body, baseline_body);
 
     // The pipeline asynchronously records the candidate regression.
     let entries = wait_for_entries(&proxy.store).await;
@@ -164,18 +162,18 @@ async fn client_gets_primary_response_and_diffs_are_recorded() {
     assert_eq!(entry.endpoint, "/api/v1/users/:id");
     assert!(entry.raw_fields.contains_key("name"));
     assert!(entry.noise_fields.is_empty());
-    assert_eq!(entry.primary_status, 200);
+    assert_eq!(entry.baseline_status, 200);
     assert_eq!(entry.candidate_status, Some(200));
 }
 
 #[tokio::test]
 async fn identical_upstreams_produce_no_diff_entries() {
     let body = json!({"a": 1});
-    let primary = spawn_json_upstream(body.clone()).await;
-    let secondary = spawn_json_upstream(body.clone()).await;
+    let baseline = spawn_json_upstream(body.clone()).await;
+    let control = spawn_json_upstream(body.clone()).await;
     let candidate = spawn_json_upstream(body.clone()).await;
 
-    let proxy = spawn_proxy(primary, secondary, candidate).await;
+    let proxy = spawn_proxy(baseline, control, candidate).await;
 
     let response = http_client()
         .get(format!("http://{}/api/v1/users/1", proxy.addr))
@@ -192,11 +190,11 @@ async fn identical_upstreams_produce_no_diff_entries() {
 #[tokio::test]
 async fn mutating_methods_are_blocked() {
     let body = json!({"a": 1});
-    let primary = spawn_json_upstream(body.clone()).await;
-    let secondary = spawn_json_upstream(body.clone()).await;
+    let baseline = spawn_json_upstream(body.clone()).await;
+    let control = spawn_json_upstream(body.clone()).await;
     let candidate = spawn_json_upstream(body.clone()).await;
 
-    let proxy = spawn_proxy(primary, secondary, candidate).await;
+    let proxy = spawn_proxy(baseline, control, candidate).await;
 
     let client = http_client();
     let response = client

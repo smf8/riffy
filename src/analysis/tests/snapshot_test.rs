@@ -1,7 +1,7 @@
-use crate::analysis::joined::JoinedField;
+use crate::analysis::snapshot::FieldSnapshot;
 
-fn field(raw: u64, noise: u64, total: u64) -> JoinedField {
-    JoinedField {
+fn field(raw: u64, noise: u64, total: u64) -> FieldSnapshot {
+    FieldSnapshot {
         path: "user.name".to_owned(),
         raw_count: raw,
         noise_count: noise,

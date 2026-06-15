@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::error::StoreError;
 use super::{DiffEntry, DiffSample, DiffStore, EndpointAggregation, FieldAggregation, SamplePage};
-use crate::compare::flatten::FlatDiff;
+use crate::compare::flatten::FieldDiff;
 use ::redis::aio::ConnectionManager;
 use ::redis::streams::{StreamId, StreamRangeReply};
 use ::redis::{from_redis_value, AsyncCommands, Value};
@@ -48,13 +48,13 @@ impl DiffStore for RedisDiffStore {
             ("timestamp", entry.timestamp.to_rfc3339()),
             ("raw_fields", raw_json),
             ("noise_fields", noise_json),
-            ("primary_status", entry.primary_status.to_string()),
+            ("baseline_status", entry.baseline_status.to_string()),
         ];
         if let Some(status) = entry.candidate_status {
             fields.push(("candidate_status", status.to_string()));
         }
-        if let Some(status) = entry.secondary_status {
-            fields.push(("secondary_status", status.to_string()));
+        if let Some(status) = entry.control_status {
+            fields.push(("control_status", status.to_string()));
         }
 
         // ConnectionManager is a cheap clonable handle to one multiplexed connection.
@@ -301,11 +301,11 @@ fn stream_field(map: &HashMap<String, Value>, name: &str) -> Result<Option<Strin
     }
 }
 
-/// Parse a stored `{path: FlatDiff}` JSON map and pluck the diff at `path`.
-fn diff_at_path(json: Option<&str>, path: &str) -> Result<Option<FlatDiff>, StoreError> {
+/// Parse a stored `{path: FieldDiff}` JSON map and pluck the diff at `path`.
+fn diff_at_path(json: Option<&str>, path: &str) -> Result<Option<FieldDiff>, StoreError> {
     match json {
         Some(json) => {
-            let map: HashMap<String, FlatDiff> =
+            let map: HashMap<String, FieldDiff> =
                 serde_json::from_str(json).map_err(StoreError::Deserialize)?;
             Ok(map.get(path).cloned())
         }

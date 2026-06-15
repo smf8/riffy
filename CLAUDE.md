@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Riffy** is a Rust reverse proxy that implements diffy-style statistical regression detection. It forwards requests to three upstream services (primary, secondary, candidate) in parallel, always returns the primary response to the client with zero overhead, and asynchronously compares the responses to detect regressions using noise-baseline analysis.
+**Riffy** is a Rust reverse proxy that implements diffy-style statistical regression detection. It forwards requests to three upstream services (baseline, control, candidate) in parallel, always returns the baseline response to the client with zero overhead, and asynchronously compares the responses to detect regressions using noise-baseline analysis.
 
 ---
 
@@ -41,16 +41,16 @@
 ## Architecture Constraints
 
 ### The #1 Rule: Proxy Hot Path Must Be Zero-Overhead
-The reverse proxy path (receive request → call primary upstream → return response) **must never block, wait, or incur overhead from analysis work**. Specifically:
-- The client response is sent immediately after the primary upstream responds.
-- Candidate and secondary upstream calls are fired as background `tokio::spawn` tasks.
+The reverse proxy path (receive request → call baseline upstream → return response) **must never block, wait, or incur overhead from analysis work**. Specifically:
+- The client response is sent immediately after the baseline upstream responds.
+- Candidate and control upstream calls are fired as background `tokio::spawn` tasks.
 - Analysis, diffing, and Redis writes happen asynchronously via an mpsc channel — never on the proxy hot path.
 
 ### Response Rule
-The client **always** receives the primary upstream response. There is no configurable response mode.
+The client **always** receives the baseline upstream response. There is no configurable response mode.
 
 ### Side-Effect Safety
-By default, mutating HTTP methods (POST, PUT, PATCH, DELETE) are **blocked** from being forwarded to candidate/secondary. This is controlled by `proxy.allow-http-side-effects` in config.
+By default, mutating HTTP methods (POST, PUT, PATCH, DELETE) are **blocked** from being forwarded to candidate/control. This is controlled by `proxy.allow-http-side-effects` in config.
 
 ---
 

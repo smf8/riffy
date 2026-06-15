@@ -1,5 +1,12 @@
 # Riffy — Rust Diffy Implementation Plan
 
+> **Historical document.** This captures the original diffy-based design and
+> uses the old terminology (`primary`/`secondary`/`candidate`) and module layout
+> (`handler/`, `proxy/`). The terminology and packaging were later changed for
+> clarity (see `Progress.md` R30): upstreams are now **baseline** / **candidate**
+> / **control**, and HTTP code lives in `http/` with the upstream client in
+> `upstream/`. For what the code does *today*, read `docs/architecture.md`.
+
 ## Overview
 
 Riffy is a Rust reverse proxy that compares responses from three upstream services (primary, secondary, candidate) to detect regressions. It uses diffy's statistical noise detection: primary vs secondary disagreement = noise baseline, primary vs candidate disagreement = raw diff. Fields where raw significantly exceeds noise are real regressions.

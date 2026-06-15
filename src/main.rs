@@ -3,19 +3,20 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use anyhow::Context;
-use riffy::analysis::collector::InMemoryDifferenceCollector;
-use riffy::analysis::filter::DifferencesFilter;
+use riffy::analysis::classify::RegressionClassifier;
+use riffy::analysis::counters::LiveCounters;
 use riffy::endpoint::EndpointMatcher;
-use riffy::handler::router::{admin_router, create_router, AdminState, AppState};
+use riffy::http::router::{admin_router, create_router, AdminState, AppState};
 use riffy::pipeline::consumer::Consumer;
-use riffy::proxy::UpstreamClient;
 use riffy::storage::{DiffStore, InMemoryDiffStore, RedisDiffStore};
+use riffy::upstream::UpstreamClient;
 use riffy::{config, pipeline, telemetry};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Snapshot cadence for the in-memory store when Redis is not configured.
-const DEFAULT_AGGREGATION_INTERVAL: Duration = Duration::from_secs(10);
+/// Counter-buffer flush cadence used when Redis is not configured. Short: the
+/// flush only drains raw counts, so reads stay near-current at negligible cost.
+const DEFAULT_AGGREGATION_INTERVAL: Duration = Duration::from_secs(1);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -27,8 +28,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Upstream client
     let upstream = UpstreamClient::new(
-        cfg.upstream.primary.clone(),
-        cfg.upstream.secondary.clone(),
+        cfg.upstream.baseline.clone(),
+        cfg.upstream.control.clone(),
         cfg.upstream.candidate.clone(),
         cfg.upstream.protocol.clone(),
         cfg.upstream.timeout,
@@ -37,10 +38,10 @@ async fn main() -> anyhow::Result<()> {
     // Analysis pipeline: bounded channel → single consumer task
     let (analysis_tx, analysis_rx) = pipeline::channel();
 
-    let collector = Arc::new(InMemoryDifferenceCollector::new());
+    let collector = Arc::new(LiveCounters::new());
     let patterns: Vec<String> = cfg.endpoints.iter().map(|e| e.pattern.clone()).collect();
     let matcher = Arc::new(EndpointMatcher::new(&patterns));
-    let filter = DifferencesFilter::from_config(&cfg.threshold);
+    let filter = RegressionClassifier::from_config(&cfg.threshold);
 
     // Redis is opt-in: with no redis config we fall back to the in-memory
     // store (no persistence). The store is shared between the consumer (writer)
@@ -69,7 +70,6 @@ async fn main() -> anyhow::Result<()> {
         analysis_rx,
         matcher.clone(),
         collector,
-        filter,
         store.clone(),
         aggregation_interval,
     )
@@ -102,10 +102,12 @@ async fn main() -> anyhow::Result<()> {
     let proxy_listener = tokio::net::TcpListener::bind(&proxy_addr).await?;
     tracing::info!(addr = %proxy_addr, "proxy server listening");
 
-    // Admin server (healthz + metrics + diff query API)
+    // Admin server (healthz + metrics + diff query API). The query API applies
+    // `filter` at read time to classify regressions from the stored raw counts.
     let admin_app = admin_router(AdminState {
         metrics: metrics_handle,
         store,
+        classifier: filter,
     });
     let admin_addr = format!("{}:{}", cfg.server.address, cfg.server.port);
     let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;

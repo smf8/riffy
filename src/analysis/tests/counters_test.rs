@@ -1,12 +1,12 @@
-use crate::analysis::collector::InMemoryDifferenceCollector;
-use crate::analysis::DifferenceCollector;
+use crate::analysis::counters::LiveCounters;
+use crate::analysis::DiffCounters;
 use crate::compare::flatten::flatten_value;
 use serde_json::json;
 use std::collections::HashMap;
 
 #[test]
 fn record_increments_total_and_field_counters() {
-    let collector = InMemoryDifferenceCollector::new();
+    let collector = LiveCounters::new();
 
     let raw = flatten_value(&json!({"a": 1}), &json!({"a": 2}));
     let noise = HashMap::new();
@@ -30,7 +30,7 @@ fn record_increments_total_and_field_counters() {
 
 #[test]
 fn raw_and_noise_counters_are_independent() {
-    let collector = InMemoryDifferenceCollector::new();
+    let collector = LiveCounters::new();
 
     let raw = flatten_value(&json!({"a": 1}), &json!({"a": 2}));
     let noise = flatten_value(&json!({"b": 1}), &json!({"b": 2}));
@@ -49,7 +49,7 @@ fn raw_and_noise_counters_are_independent() {
 
 #[test]
 fn same_field_in_raw_and_noise_bumps_both() {
-    let collector = InMemoryDifferenceCollector::new();
+    let collector = LiveCounters::new();
 
     let diffs = flatten_value(&json!({"a": 1}), &json!({"a": 2}));
     collector.record("/e", &diffs, &diffs);
@@ -61,7 +61,7 @@ fn same_field_in_raw_and_noise_bumps_both() {
 
 #[test]
 fn endpoints_are_isolated() {
-    let collector = InMemoryDifferenceCollector::new();
+    let collector = LiveCounters::new();
     let diffs = flatten_value(&json!({"a": 1}), &json!({"a": 2}));
     let empty = HashMap::new();
 
@@ -80,7 +80,7 @@ fn endpoints_are_isolated() {
 
 #[test]
 fn empty_diffs_still_count_toward_total() {
-    let collector = InMemoryDifferenceCollector::new();
+    let collector = LiveCounters::new();
     let empty = HashMap::new();
 
     collector.record("/e", &empty, &empty);

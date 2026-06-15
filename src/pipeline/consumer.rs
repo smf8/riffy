@@ -4,12 +4,11 @@ use std::time::Duration;
 
 use super::decode::decode_body;
 use super::AnalysisMessage;
-use crate::analysis::filter::DifferencesFilter;
-use crate::analysis::DifferenceCollector;
-use crate::compare::flatten::{flatten_value, FlatDiff};
+use crate::analysis::DiffCounters;
+use crate::compare::flatten::{flatten_value, FieldDiff};
 use crate::endpoint::EndpointMatcher;
-use crate::proxy::upstream::UpstreamResponse;
 use crate::storage::{DiffEntry, DiffStore, EndpointAggregation, FieldAggregation};
+use crate::upstream::client::UpstreamResponse;
 use chrono::Utc;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -17,13 +16,14 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
 /// Single-task consumer of the analysis channel: resolves endpoints, diffs
-/// the response triplet, updates counters, appends per-request diff entries
-/// to the store and periodically snapshots aggregations.
+/// the response triplet, updates the in-memory counter buffer, appends
+/// per-request diff entries to the store, and periodically flushes the raw
+/// counts to the store. Regression classification happens at read time, not
+/// here.
 pub struct Consumer {
     rx: mpsc::Receiver<AnalysisMessage>,
     matcher: Arc<EndpointMatcher>,
-    collector: Arc<dyn DifferenceCollector>,
-    filter: DifferencesFilter,
+    collector: Arc<dyn DiffCounters>,
     store: Arc<dyn DiffStore>,
     aggregation_interval: Duration,
 }
@@ -32,8 +32,7 @@ impl Consumer {
     pub fn new(
         rx: mpsc::Receiver<AnalysisMessage>,
         matcher: Arc<EndpointMatcher>,
-        collector: Arc<dyn DifferenceCollector>,
-        filter: DifferencesFilter,
+        collector: Arc<dyn DiffCounters>,
         store: Arc<dyn DiffStore>,
         aggregation_interval: Duration,
     ) -> Self {
@@ -41,7 +40,6 @@ impl Consumer {
             rx,
             matcher,
             collector,
-            filter,
             store,
             aggregation_interval,
         }
@@ -72,29 +70,29 @@ impl Consumer {
 
     async fn handle(&self, msg: AnalysisMessage) {
         let endpoint = self.matcher.resolve(&msg.path);
-        let primary_status = msg.primary_response.status;
+        let baseline_status = msg.baseline_response.status;
 
-        let Some(primary) = parse_json_body(&msg.primary_response).await else {
+        let Some(baseline) = parse_json_body(&msg.baseline_response).await else {
             tracing::warn!(
                 endpoint = %endpoint,
-                "skipping analysis: primary response body is not readable json"
+                "skipping analysis: baseline response body is not readable json"
             );
             return;
         };
 
         // Statuses are checked before bodies: a body is only compared when
-        // its upstream answered with the same status as primary. A different
+        // its upstream answered with the same status as baseline. A different
         // status is itself the regression signal and is reported directly.
-        let raw_diffs = diff_against(&primary, primary_status, &msg.candidate_response).await;
-        let noise_diffs = diff_against(&primary, primary_status, &msg.secondary_response).await;
+        let raw_diffs = diff_against(&baseline, baseline_status, &msg.candidate_response).await;
+        let noise_diffs = diff_against(&baseline, baseline_status, &msg.control_response).await;
 
         self.collector.record(&endpoint, &raw_diffs, &noise_diffs);
 
         let candidate_status = msg.candidate_response.as_ref().map(|r| r.status);
-        let secondary_status = msg.secondary_response.as_ref().map(|r| r.status);
+        let control_status = msg.control_response.as_ref().map(|r| r.status);
 
-        let status_mismatch = candidate_status.is_some_and(|s| s != primary_status)
-            || secondary_status.is_some_and(|s| s != primary_status);
+        let status_mismatch = candidate_status.is_some_and(|s| s != baseline_status)
+            || control_status.is_some_and(|s| s != baseline_status);
 
         // Identical responses produce no entry — only counters (total) move.
         if raw_diffs.is_empty() && noise_diffs.is_empty() && !status_mismatch {
@@ -106,9 +104,9 @@ impl Consumer {
             timestamp: Utc::now(),
             raw_fields: raw_diffs,
             noise_fields: noise_diffs,
-            primary_status,
+            baseline_status,
             candidate_status,
-            secondary_status,
+            control_status,
         };
 
         // Store failures are non-fatal: log and keep consuming.
@@ -136,17 +134,17 @@ impl Consumer {
             .map(|snapshot| EndpointAggregation {
                 endpoint: snapshot.endpoint,
                 total: snapshot.total,
+                // Raw counts only; the regression verdict is computed at read
+                // time, so the flush stays a cheap buffer drain.
                 fields: snapshot
                     .fields
                     .into_iter()
                     .map(|field| {
-                        let is_regression = self.filter.is_regression(&field);
                         (
                             field.path,
                             FieldAggregation {
                                 raw_count: field.raw_count,
                                 noise_count: field.noise_count,
-                                is_regression,
                             },
                         )
                     })
@@ -161,17 +159,17 @@ impl Consumer {
     }
 }
 
-/// Field-by-field diff of primary against one comparable upstream response.
+/// Field-by-field diff of baseline against one comparable upstream response.
 /// Empty when the upstream failed, answered with a different status, or its
 /// body is not readable JSON.
 async fn diff_against(
-    primary: &Value,
-    primary_status: u16,
+    baseline: &Value,
+    baseline_status: u16,
     response: &Option<UpstreamResponse>,
-) -> HashMap<String, FlatDiff> {
+) -> HashMap<String, FieldDiff> {
     match response {
-        Some(r) if r.status == primary_status => match parse_json_body(r).await {
-            Some(other) => flatten_value(primary, &other),
+        Some(r) if r.status == baseline_status => match parse_json_body(r).await {
+            Some(other) => flatten_value(baseline, &other),
             None => HashMap::new(),
         },
         _ => HashMap::new(),

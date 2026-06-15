@@ -1,4 +1,4 @@
-use crate::proxy::upstream::UpstreamResponse;
+use crate::upstream::client::UpstreamResponse;
 use tokio::sync::mpsc;
 
 pub mod consumer;
@@ -19,9 +19,9 @@ pub struct AnalysisMessage {
     pub path: String,
     /// When the proxy received the request — measures pipeline lag.
     pub received_at: std::time::Instant,
-    pub primary_response: UpstreamResponse,
+    pub baseline_response: UpstreamResponse,
     pub candidate_response: Option<UpstreamResponse>,
-    pub secondary_response: Option<UpstreamResponse>,
+    pub control_response: Option<UpstreamResponse>,
 }
 
 pub fn channel() -> (

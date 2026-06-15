@@ -6,8 +6,8 @@ proxy:
   allow-http-side-effects: false
 
 upstream:
-  primary: "localhost:9100"
-  secondary: "localhost:9200"
+  baseline: "localhost:9100"
+  control: "localhost:9200"
   candidate: "localhost:9000"
   protocol: http
   timeout: 30s
@@ -26,7 +26,9 @@ threshold:
 redis:
   uri: "redis://localhost:6379"
   stream-key: "riffy:diffs"
-  aggregation-interval: 10s
+  # How often the in-memory counter buffer is flushed (raw counts only) to the
+  # store. Short = near-current reads; the flush is cheap (one pipelined write).
+  aggregation-interval: 1s
   aggregation-key-prefix: "riffy:agg"
 
 server:

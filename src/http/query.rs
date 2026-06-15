@@ -12,7 +12,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::analysis::joined::JoinedField;
+use crate::analysis::classify::RegressionClassifier;
+use crate::analysis::snapshot::FieldSnapshot;
 use crate::error::AppError;
 use crate::storage::{DiffStore, EndpointAggregation, SamplePage};
 
@@ -96,6 +97,7 @@ pub struct DiffDetail {
 /// plus a paginated, newest-first list of the actual diff samples at that path.
 pub async fn diff_detail(
     State(store): State<Arc<dyn DiffStore>>,
+    State(classifier): State<RegressionClassifier>,
     Query(query): Query<DetailQuery>,
 ) -> Result<Response, AppError> {
     let limit = query
@@ -111,9 +113,9 @@ pub async fn diff_detail(
 
     let total = aggregation.as_ref().map(|a| a.total).unwrap_or(0);
     let last_updated = aggregation.as_ref().map(|a| a.last_updated);
-    let (raw_count, noise_count, is_regression) = match field {
-        Some(field) => (field.raw_count, field.noise_count, field.is_regression),
-        None => (0, 0, false),
+    let (raw_count, noise_count) = match field {
+        Some(field) => (field.raw_count, field.noise_count),
+        None => (0, 0),
     };
 
     let samples = store
@@ -129,14 +131,15 @@ pub async fn diff_detail(
         )));
     }
 
-    // Reuse the analyzer's noise math so the reported percentages match the
-    // filter that classifies regressions.
-    let joined = JoinedField {
+    // Derive the verdict and percentages from the stored raw counts at read
+    // time against the live thresholds (the store persists counts only).
+    let joined = FieldSnapshot {
         path: query.path.clone(),
         raw_count,
         noise_count,
         endpoint_total: total,
     };
+    let is_regression = classifier.is_regression(&joined);
 
     Ok(Json(DiffDetail {
         endpoint: query.endpoint,

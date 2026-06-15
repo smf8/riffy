@@ -1,14 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::analysis::collector::InMemoryDifferenceCollector;
-use crate::analysis::filter::DifferencesFilter;
-use crate::analysis::DifferenceCollector;
+use crate::analysis::counters::LiveCounters;
+use crate::analysis::DiffCounters;
 use crate::endpoint::EndpointMatcher;
 use crate::pipeline::consumer::Consumer;
 use crate::pipeline::AnalysisMessage;
-use crate::proxy::upstream::UpstreamResponse;
 use crate::storage::InMemoryDiffStore;
+use crate::upstream::client::UpstreamResponse;
 use axum::http::HeaderMap;
 use bytes::Bytes;
 
@@ -22,16 +21,16 @@ fn response(status: u16, body: &str) -> UpstreamResponse {
 
 fn message(
     path: &str,
-    primary: &str,
+    baseline: &str,
     candidate: Option<&str>,
-    secondary: Option<&str>,
+    control: Option<&str>,
 ) -> AnalysisMessage {
     AnalysisMessage {
         path: path.to_owned(),
         received_at: std::time::Instant::now(),
-        primary_response: response(200, primary),
+        baseline_response: response(200, baseline),
         candidate_response: candidate.map(|b| response(200, b)),
-        secondary_response: secondary.map(|b| response(200, b)),
+        control_response: control.map(|b| response(200, b)),
     }
 }
 
@@ -40,18 +39,16 @@ fn message(
 /// long so only the final shutdown flush writes snapshots.
 async fn run_consumer(
     messages: Vec<AnalysisMessage>,
-) -> (Arc<InMemoryDiffStore>, Arc<InMemoryDifferenceCollector>) {
+) -> (Arc<InMemoryDiffStore>, Arc<LiveCounters>) {
     let (tx, rx) = crate::pipeline::channel();
-    let collector = Arc::new(InMemoryDifferenceCollector::new());
+    let collector = Arc::new(LiveCounters::new());
     let store = Arc::new(InMemoryDiffStore::new());
     let matcher = Arc::new(EndpointMatcher::new(&["/api/v1/users/:id".to_owned()]));
-    let filter = DifferencesFilter::new(20.0, 0.03);
 
     let handle = Consumer::new(
         rx,
         matcher,
         collector.clone(),
-        filter,
         store.clone(),
         Duration::from_secs(3600),
     )
@@ -83,9 +80,9 @@ async fn writes_diff_entry_for_differing_responses() {
     assert_eq!(entry.endpoint, "/api/v1/users/:id");
     assert!(entry.raw_fields.contains_key("name"));
     assert!(entry.noise_fields.is_empty());
-    assert_eq!(entry.primary_status, 200);
+    assert_eq!(entry.baseline_status, 200);
     assert_eq!(entry.candidate_status, Some(200));
-    assert_eq!(entry.secondary_status, Some(200));
+    assert_eq!(entry.control_status, Some(200));
 }
 
 #[tokio::test]
@@ -195,15 +192,15 @@ async fn final_flush_writes_aggregation_snapshot() {
     let aggregation = store.aggregation("/api/v1/users/:id").await.unwrap();
     assert_eq!(aggregation.total, 2);
 
+    // The store holds raw counts only; the regression verdict is derived at
+    // read time (covered by the classify tests), not persisted here.
     let field = aggregation.fields.get("n").unwrap();
     assert_eq!(field.raw_count, 2);
     assert_eq!(field.noise_count, 0);
-    // raw=2 noise=0 total=2 → relative 100% > 20%, absolute 100% > 0.03%
-    assert!(field.is_regression);
 }
 
 #[tokio::test]
-async fn non_json_primary_is_skipped_entirely() {
+async fn non_json_baseline_is_skipped_entirely() {
     let (store, collector) =
         run_consumer(vec![message("/x", "<html>", Some(r#"{"a": 1}"#), None)]).await;
 
@@ -212,7 +209,7 @@ async fn non_json_primary_is_skipped_entirely() {
 }
 
 #[tokio::test]
-async fn gzip_primary_is_decompressed_and_analyzed() {
+async fn gzip_baseline_is_decompressed_and_analyzed() {
     use async_compression::tokio::bufread::GzipEncoder;
     use tokio::io::AsyncReadExt;
 
@@ -223,8 +220,8 @@ async fn gzip_primary_is_decompressed_and_analyzed() {
         .unwrap();
 
     let mut msg = message("/x", "", Some(r#"{"a": 2}"#), None);
-    msg.primary_response.body = Bytes::from(compressed);
-    msg.primary_response.headers.insert(
+    msg.baseline_response.body = Bytes::from(compressed);
+    msg.baseline_response.headers.insert(
         axum::http::header::CONTENT_ENCODING,
         "gzip".parse().unwrap(),
     );
@@ -237,9 +234,9 @@ async fn gzip_primary_is_decompressed_and_analyzed() {
 }
 
 #[tokio::test]
-async fn unsupported_encoding_on_primary_is_skipped() {
+async fn unsupported_encoding_on_baseline_is_skipped() {
     let mut msg = message("/x", r#"{"a": 1}"#, Some(r#"{"a": 2}"#), None);
-    msg.primary_response.headers.insert(
+    msg.baseline_response.headers.insert(
         axum::http::header::CONTENT_ENCODING,
         "compress".parse().unwrap(),
     );

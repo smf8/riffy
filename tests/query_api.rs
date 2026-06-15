@@ -7,8 +7,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use chrono::Utc;
-use riffy::compare::flatten::{DiffType, FlatDiff};
-use riffy::handler::router::{admin_router, AdminState};
+use riffy::analysis::classify::RegressionClassifier;
+use riffy::compare::flatten::{DiffType, FieldDiff};
+use riffy::http::router::{admin_router, AdminState};
 use riffy::storage::{
     DiffEntry, DiffStore, EndpointAggregation, FieldAggregation, InMemoryDiffStore,
 };
@@ -18,6 +19,7 @@ async fn spawn_admin(store: Arc<dyn DiffStore>) -> SocketAddr {
     let state = AdminState {
         metrics: None,
         store,
+        classifier: RegressionClassifier::new(20.0, 0.03),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -30,11 +32,10 @@ fn http_client() -> reqwest::Client {
     reqwest::Client::builder().no_proxy().build().unwrap()
 }
 
-fn field(raw: u64, noise: u64, regression: bool) -> FieldAggregation {
+fn field(raw: u64, noise: u64) -> FieldAggregation {
     FieldAggregation {
         raw_count: raw,
         noise_count: noise,
-        is_regression: regression,
     }
 }
 
@@ -43,8 +44,8 @@ async fn list_paths_lists_all_endpoints_and_filters_by_endpoint() {
     let store = Arc::new(InMemoryDiffStore::new());
 
     let mut users_fields = HashMap::new();
-    users_fields.insert("user.name".to_owned(), field(5, 1, true));
-    users_fields.insert("user.email".to_owned(), field(2, 0, true));
+    users_fields.insert("user.name".to_owned(), field(5, 1));
+    users_fields.insert("user.email".to_owned(), field(2, 0));
     store
         .write_aggregation(&[
             EndpointAggregation {
@@ -110,7 +111,7 @@ async fn diff_detail_returns_stats_and_paginated_samples() {
     let store = Arc::new(InMemoryDiffStore::new());
 
     let mut fields = HashMap::new();
-    fields.insert("user.name".to_owned(), field(3, 0, true));
+    fields.insert("user.name".to_owned(), field(3, 0));
     store
         .write_aggregation(&[EndpointAggregation {
             endpoint: "/api/v1/users/:id".to_owned(),
@@ -125,7 +126,7 @@ async fn diff_detail_returns_stats_and_paginated_samples() {
         let mut raw_fields = HashMap::new();
         raw_fields.insert(
             "user.name".to_owned(),
-            FlatDiff {
+            FieldDiff {
                 left: Some(json!(format!("alice{i}"))),
                 right: Some(json!(format!("bob{i}"))),
                 diff_type: DiffType::Primitive,
@@ -137,9 +138,9 @@ async fn diff_detail_returns_stats_and_paginated_samples() {
                 timestamp: Utc::now(),
                 raw_fields,
                 noise_fields: HashMap::new(),
-                primary_status: 200,
+                baseline_status: 200,
                 candidate_status: Some(200),
-                secondary_status: Some(200),
+                control_status: Some(200),
             })
             .await
             .unwrap();

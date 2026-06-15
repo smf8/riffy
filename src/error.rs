@@ -8,7 +8,7 @@ use serde_json::json;
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("{0}")]
-    Proxy(#[source] crate::proxy::error::ProxyError),
+    Upstream(#[source] crate::upstream::error::UpstreamError),
 
     #[error("storage error: {0}")]
     Storage(#[from] crate::storage::error::StoreError),
@@ -20,8 +20,8 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            AppError::Proxy(e) => {
-                tracing::error!(error = %e, "proxy request error");
+            AppError::Upstream(e) => {
+                tracing::error!(error = %e, "upstream request error");
                 (e.status_code(), e.to_string())
             }
             AppError::Storage(e) => {
@@ -39,9 +39,9 @@ impl IntoResponse for AppError {
     }
 }
 
-impl From<crate::proxy::error::ProxyError> for AppError {
-    fn from(e: crate::proxy::error::ProxyError) -> Self {
-        AppError::Proxy(e)
+impl From<crate::upstream::error::UpstreamError> for AppError {
+    fn from(e: crate::upstream::error::UpstreamError) -> Self {
+        AppError::Upstream(e)
     }
 }
 

@@ -21,7 +21,7 @@ pub enum DiffType {
 /// `Deserialize` so the read API can reconstruct it from JSON persisted in the
 /// store (Redis stream fields / in-memory entries).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FlatDiff {
+pub struct FieldDiff {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub left: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -29,9 +29,9 @@ pub struct FlatDiff {
     pub diff_type: DiffType,
 }
 
-/// Recursively flatten a `Difference` tree into a `HashMap<String, FlatDiff>`
+/// Recursively flatten a `Difference` tree into a `HashMap<String, FieldDiff>`
 /// keyed by dot-separated JSON paths (e.g. `"user.name"`, `"items.0"`).
-pub fn flatten(diff: &Difference, prefix: &str) -> HashMap<String, FlatDiff> {
+pub fn flatten(diff: &Difference, prefix: &str) -> HashMap<String, FieldDiff> {
     let mut out = HashMap::new();
     flatten_into(diff, prefix, &mut out);
     out
@@ -47,14 +47,14 @@ fn join_path(prefix: &str, segment: &str) -> String {
     }
 }
 
-fn flatten_into(diff: &Difference, path: &str, out: &mut HashMap<String, FlatDiff>) {
+fn flatten_into(diff: &Difference, path: &str, out: &mut HashMap<String, FieldDiff>) {
     match diff {
         Difference::NoDifference(_) => {}
 
         Difference::PrimitiveDifference { left, right } => {
             out.insert(
                 path.to_owned(),
-                FlatDiff {
+                FieldDiff {
                     left: Some(left.clone()),
                     right: Some(right.clone()),
                     diff_type: DiffType::Primitive,
@@ -71,7 +71,7 @@ fn flatten_into(diff: &Difference, path: &str, out: &mut HashMap<String, FlatDif
         Difference::MissingField { value } => {
             out.insert(
                 path.to_owned(),
-                FlatDiff {
+                FieldDiff {
                     left: Some(value.clone()),
                     right: None,
                     diff_type: DiffType::MissingField,
@@ -82,7 +82,7 @@ fn flatten_into(diff: &Difference, path: &str, out: &mut HashMap<String, FlatDif
         Difference::ExtraField { value } => {
             out.insert(
                 path.to_owned(),
-                FlatDiff {
+                FieldDiff {
                     left: None,
                     right: Some(value.clone()),
                     diff_type: DiffType::ExtraField,
@@ -102,7 +102,7 @@ fn flatten_into(diff: &Difference, path: &str, out: &mut HashMap<String, FlatDif
         } => {
             out.insert(
                 path.to_owned(),
-                FlatDiff {
+                FieldDiff {
                     left: Some(Value::Array(left_not_right.clone())),
                     right: Some(Value::Array(right_not_left.clone())),
                     diff_type: DiffType::SeqSize,
@@ -113,7 +113,7 @@ fn flatten_into(diff: &Difference, path: &str, out: &mut HashMap<String, FlatDif
         Difference::OrderingDifference => {
             out.insert(
                 path.to_owned(),
-                FlatDiff {
+                FieldDiff {
                     left: None,
                     right: None,
                     diff_type: DiffType::Ordering,
@@ -128,7 +128,7 @@ fn flatten_into(diff: &Difference, path: &str, out: &mut HashMap<String, FlatDif
         } => {
             out.insert(
                 path.to_owned(),
-                FlatDiff {
+                FieldDiff {
                     left: Some(left_value.clone()),
                     right: Some(right_value.clone()),
                     diff_type: DiffType::TypeMismatch,
@@ -139,8 +139,8 @@ fn flatten_into(diff: &Difference, path: &str, out: &mut HashMap<String, FlatDif
 }
 
 /// Diff two `serde_json::Value`s and flatten the result into a
-/// `HashMap<String, FlatDiff>` keyed by dot-separated paths from the root.
-pub fn flatten_value(left: &Value, right: &Value) -> HashMap<String, FlatDiff> {
+/// `HashMap<String, FieldDiff>` keyed by dot-separated paths from the root.
+pub fn flatten_value(left: &Value, right: &Value) -> HashMap<String, FieldDiff> {
     let difference = diff(left, right);
     flatten(&difference, "")
 }

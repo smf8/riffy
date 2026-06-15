@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::pipeline::decode::decode_body;
-use crate::proxy::upstream::UpstreamResponse;
+use crate::upstream::client::UpstreamResponse;
 use async_compression::tokio::bufread::{BrotliEncoder, GzipEncoder, ZlibEncoder, ZstdEncoder};
 use axum::http::header::CONTENT_ENCODING;
 use axum::http::HeaderMap;

@@ -1,4 +1,4 @@
-use super::error::ProxyError;
+use super::error::UpstreamError;
 use axum::http::{HeaderMap, Method};
 use bytes::Bytes;
 use reqwest::Client;
@@ -13,8 +13,8 @@ pub struct UpstreamResponse {
 
 pub struct UpstreamClient {
     client: Client,
-    pub primary: String,
-    pub secondary: String,
+    pub baseline: String,
+    pub control: String,
     pub candidate: String,
     pub protocol: String,
     pub timeout: Duration,
@@ -31,8 +31,8 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 
 impl UpstreamClient {
     pub fn new(
-        primary: String,
-        secondary: String,
+        baseline: String,
+        control: String,
         candidate: String,
         protocol: String,
         timeout: Duration,
@@ -48,8 +48,8 @@ impl UpstreamClient {
 
         Self {
             client,
-            primary,
-            secondary,
+            baseline,
+            control,
             candidate,
             protocol,
             timeout,
@@ -64,7 +64,7 @@ impl UpstreamClient {
         path: &str,
         headers: &HeaderMap,
         body: Bytes,
-    ) -> Result<UpstreamResponse, ProxyError> {
+    ) -> Result<UpstreamResponse, UpstreamError> {
         tracing::Span::current().record("target", target);
 
         let url = format!("{}://{}{}", self.protocol, target, path);
@@ -83,9 +83,9 @@ impl UpstreamClient {
 
         let resp = builder.send().await.map_err(|e| {
             if e.is_timeout() {
-                ProxyError::timeout(target, e)
+                UpstreamError::timeout(target, e)
             } else {
-                ProxyError::connection(target, e)
+                UpstreamError::connection(target, e)
             }
         })?;
 
@@ -107,7 +107,7 @@ impl UpstreamClient {
         let body = resp
             .bytes()
             .await
-            .map_err(|e| ProxyError::connection(target, e))?;
+            .map_err(|e| UpstreamError::connection(target, e))?;
 
         tracing::debug!(status, body_len = body.len(), target = %target ,"upstream response received");
 
@@ -119,6 +119,6 @@ impl UpstreamClient {
     }
 
     pub fn targets(&self) -> [&str; 3] {
-        [&self.primary, &self.candidate, &self.secondary]
+        [&self.baseline, &self.candidate, &self.control]
     }
 }

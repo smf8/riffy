@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::compare::flatten::FlatDiff;
+use crate::compare::flatten::FieldDiff;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -21,13 +21,13 @@ use error::StoreError;
 pub struct DiffEntry {
     pub endpoint: String,
     pub timestamp: DateTime<Utc>,
-    /// primary vs candidate field diffs.
-    pub raw_fields: HashMap<String, FlatDiff>,
-    /// primary vs secondary field diffs.
-    pub noise_fields: HashMap<String, FlatDiff>,
-    pub primary_status: u16,
+    /// baseline vs candidate field diffs.
+    pub raw_fields: HashMap<String, FieldDiff>,
+    /// baseline vs control field diffs.
+    pub noise_fields: HashMap<String, FieldDiff>,
+    pub baseline_status: u16,
     pub candidate_status: Option<u16>,
-    pub secondary_status: Option<u16>,
+    pub control_status: Option<u16>,
 }
 
 /// Periodic per-endpoint counter snapshot, destined for a Redis hash.
@@ -39,23 +39,26 @@ pub struct EndpointAggregation {
     pub last_updated: DateTime<Utc>,
 }
 
+/// Stored raw counters for one field path. The regression verdict and the
+/// relative/absolute percentages are derived from these at read time against
+/// the live thresholds — never persisted, so changing a threshold reclassifies
+/// every endpoint instantly with no re-flush.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldAggregation {
     pub raw_count: u64,
     pub noise_count: u64,
-    pub is_regression: bool,
 }
 
 /// One stored per-request difference observed at a single field path, as
-/// returned by the read API. `raw` is the primary-vs-candidate diff at this
-/// path, `noise` the primary-vs-secondary diff; at least one is present.
+/// returned by the read API. `raw` is the baseline-vs-candidate diff at this
+/// path, `noise` the baseline-vs-control diff; at least one is present.
 #[derive(Debug, Clone, Serialize)]
 pub struct DiffSample {
     pub timestamp: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub raw: Option<FlatDiff>,
+    pub raw: Option<FieldDiff>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub noise: Option<FlatDiff>,
+    pub noise: Option<FieldDiff>,
 }
 
 /// A newest-first page of `DiffSample`s for one endpoint + field path.

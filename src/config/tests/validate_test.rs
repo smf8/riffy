@@ -9,8 +9,8 @@ fn valid_config() -> Riffy {
             allow_http_side_effects: false,
         },
         upstream: Upstream {
-            primary: "localhost:9100".to_owned(),
-            secondary: "localhost:9200".to_owned(),
+            baseline: "localhost:9100".to_owned(),
+            control: "localhost:9200".to_owned(),
             candidate: "localhost:9000".to_owned(),
             protocol: "http".to_owned(),
             timeout: Duration::from_secs(30),

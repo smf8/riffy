@@ -24,8 +24,8 @@ the doc follows the code and cites the revision number (R#) from
 
 1. Read the current `docs/architecture.md` and the diff you just made.
 2. Trace the affected path in code — do not write from memory. The flow lives
-   in: `src/handler/router.rs` → `src/telemetry/metrics.rs` (middleware) →
-   `src/handler/proxy.rs` → `src/proxy/upstream.rs` → `src/pipeline/mod.rs` →
+   in: `src/http/router.rs` → `src/telemetry/metrics.rs` (middleware) →
+   `src/http/forward.rs` → `src/upstream/client.rs` → `src/pipeline/mod.rs` →
    `src/pipeline/consumer.rs` (→ `decode.rs`, `src/endpoint/`,
    `src/analysis/`, `src/compare/`) → `src/storage/`.
 3. Update the DAG nodes/edges and the tables together — a table that
@@ -58,11 +58,14 @@ the doc follows the code and cites the revision number (R#) from
 1. **Hot-path purity is the #1 rule (R2).** Never draw analysis, decoding, or
    Redis I/O on the client-blocking path — if a change would require that, the
    change is wrong, not the diagram.
-2. **The client always gets the primary response (Q13/R3).** Response-mode
+2. **The client always gets the baseline response (Q13/R3).** Response-mode
    options were explicitly removed in Phase 1 review; do not reintroduce them
    in docs or code.
-3. **Raw vs noise terminology is fixed** (diffy parity): raw = primary vs
-   candidate, noise = primary vs secondary. Don't invent synonyms.
+3. **Upstream + diff terminology is fixed (R30):** the three upstreams are
+   **baseline** (served + trusted), **candidate** (new code), **control**
+   (baseline replica for the noise floor). The two diffs keep the **raw** /
+   **noise** names: raw = baseline vs candidate, noise = baseline vs control.
+   Don't invent synonyms or reintroduce diffy's primary/secondary.
 4. **Exact names only.** Metric names, Redis key formats
    (`{app_name}:{resource}:{type}`), config keys, and threshold defaults must
    match code character-for-character; verify with grep (step 4), never from

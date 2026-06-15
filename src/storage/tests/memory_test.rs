@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
-use crate::compare::flatten::{DiffType, FlatDiff};
+use crate::compare::flatten::{DiffType, FieldDiff};
 use crate::storage::{
     DiffEntry, DiffStore, EndpointAggregation, FieldAggregation, InMemoryDiffStore,
 };
 use chrono::Utc;
 use serde_json::json;
 
-fn flat(left: &str, right: &str) -> FlatDiff {
-    FlatDiff {
+fn flat(left: &str, right: &str) -> FieldDiff {
+    FieldDiff {
         left: Some(json!(left)),
         right: Some(json!(right)),
         diff_type: DiffType::Primitive,
@@ -26,9 +26,9 @@ fn entry(endpoint: &str, raw_path: Option<&str>, left: &str, right: &str) -> Dif
         timestamp: Utc::now(),
         raw_fields,
         noise_fields: HashMap::new(),
-        primary_status: 200,
+        baseline_status: 200,
         candidate_status: Some(200),
-        secondary_status: Some(200),
+        control_status: Some(200),
     }
 }
 
@@ -42,7 +42,6 @@ async fn get_and_list_aggregations() {
         FieldAggregation {
             raw_count: 5,
             noise_count: 1,
-            is_regression: true,
         },
     );
     store

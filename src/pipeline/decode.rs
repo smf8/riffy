@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
 use tokio::io::AsyncReadExt;
 
-use crate::proxy::upstream::UpstreamResponse;
+use crate::upstream::client::UpstreamResponse;
 
 /// Returns the response body ready for JSON parsing, decompressing it when a
 /// supported `content-encoding` is present. `None` when the encoding is

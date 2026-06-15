@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::joined::{JoinedEndpoint, JoinedField};
-use super::DifferenceCollector;
-use crate::compare::flatten::FlatDiff;
+use super::snapshot::{EndpointSnapshot, FieldSnapshot};
+use super::DiffCounters;
+use crate::compare::flatten::FieldDiff;
 use dashmap::DashMap;
 
 /// Lock-free in-memory counters: endpoint → (total, field path → raw/noise).
 #[derive(Default)]
-pub struct InMemoryDifferenceCollector {
+pub struct LiveCounters {
     endpoints: DashMap<String, EndpointStats>,
 }
 
@@ -24,18 +24,18 @@ struct FieldCounters {
     noise: AtomicU64,
 }
 
-impl InMemoryDifferenceCollector {
+impl LiveCounters {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl DifferenceCollector for InMemoryDifferenceCollector {
+impl DiffCounters for LiveCounters {
     fn record(
         &self,
         endpoint: &str,
-        raw: &HashMap<String, FlatDiff>,
-        noise: &HashMap<String, FlatDiff>,
+        raw: &HashMap<String, FieldDiff>,
+        noise: &HashMap<String, FieldDiff>,
     ) {
         let stats = self.endpoints.entry(endpoint.to_owned()).or_default();
 
@@ -60,7 +60,7 @@ impl DifferenceCollector for InMemoryDifferenceCollector {
         }
     }
 
-    fn snapshot(&self) -> Vec<JoinedEndpoint> {
+    fn snapshot(&self) -> Vec<EndpointSnapshot> {
         self.endpoints
             .iter()
             .map(|entry| {
@@ -69,7 +69,7 @@ impl DifferenceCollector for InMemoryDifferenceCollector {
                     .value()
                     .fields
                     .iter()
-                    .map(|field| JoinedField {
+                    .map(|field| FieldSnapshot {
                         path: field.key().clone(),
                         raw_count: field.value().raw.load(Ordering::Relaxed),
                         noise_count: field.value().noise.load(Ordering::Relaxed),
@@ -77,7 +77,7 @@ impl DifferenceCollector for InMemoryDifferenceCollector {
                     })
                     .collect();
 
-                JoinedEndpoint {
+                EndpointSnapshot {
                     endpoint: entry.key().clone(),
                     total,
                     fields,

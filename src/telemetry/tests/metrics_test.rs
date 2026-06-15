@@ -93,7 +93,7 @@ fn request_is_recorded_exactly_once() {
 fn upstream_timer_finish_records_ok_outcome() {
     let handle = recorder();
 
-    UpstreamTimer::start("primary", endpoint("/t/up-ok")).finish(true);
+    UpstreamTimer::start("baseline", endpoint("/t/up-ok")).finish(true);
 
     let rendered = handle.render();
     let lines = lines_for(
@@ -103,7 +103,7 @@ fn upstream_timer_finish_records_ok_outcome() {
     );
     assert!(!lines.is_empty());
     assert!(lines.iter().all(|l| l.contains("outcome=\"ok\"")));
-    assert!(lines.iter().all(|l| l.contains("upstream=\"primary\"")));
+    assert!(lines.iter().all(|l| l.contains("upstream=\"baseline\"")));
 }
 
 #[test]
@@ -126,7 +126,7 @@ fn upstream_timer_finish_records_error_outcome() {
 fn dropped_upstream_timer_records_cancelled_outcome() {
     let handle = recorder();
 
-    drop(UpstreamTimer::start("secondary", endpoint("/t/up-drop")));
+    drop(UpstreamTimer::start("control", endpoint("/t/up-drop")));
 
     let rendered = handle.render();
     let lines = lines_for(

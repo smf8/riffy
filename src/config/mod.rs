@@ -36,8 +36,8 @@ pub struct Proxy {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Upstream {
-    pub primary: String,
-    pub secondary: String,
+    pub baseline: String,
+    pub control: String,
     pub candidate: String,
     #[serde(default = "default_protocol")]
     pub protocol: String,
@@ -93,7 +93,7 @@ fn default_stream_key() -> String {
 }
 
 fn default_aggregation_interval() -> Duration {
-    Duration::from_secs(10)
+    Duration::from_secs(1)
 }
 
 fn default_agg_prefix() -> String {
@@ -158,8 +158,8 @@ impl Riffy {
         );
 
         for (role, host) in [
-            ("primary", &self.upstream.primary),
-            ("secondary", &self.upstream.secondary),
+            ("baseline", &self.upstream.baseline),
+            ("control", &self.upstream.control),
             ("candidate", &self.upstream.candidate),
         ] {
             ensure!(!host.trim().is_empty(), "upstream.{role} must not be empty");

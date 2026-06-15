@@ -1,8 +1,8 @@
-use crate::analysis::filter::DifferencesFilter;
-use crate::analysis::joined::JoinedField;
+use crate::analysis::classify::RegressionClassifier;
+use crate::analysis::snapshot::FieldSnapshot;
 
-fn field(raw: u64, noise: u64, total: u64) -> JoinedField {
-    JoinedField {
+fn field(raw: u64, noise: u64, total: u64) -> FieldSnapshot {
+    FieldSnapshot {
         path: "user.name".to_owned(),
         raw_count: raw,
         noise_count: noise,
@@ -10,9 +10,9 @@ fn field(raw: u64, noise: u64, total: u64) -> JoinedField {
     }
 }
 
-fn default_filter() -> DifferencesFilter {
+fn default_filter() -> RegressionClassifier {
     // Plan defaults: relative 20%, absolute 0.03%.
-    DifferencesFilter::new(20.0, 0.03)
+    RegressionClassifier::new(20.0, 0.03)
 }
 
 #[test]
