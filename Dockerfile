@@ -32,10 +32,16 @@ COPY --from=builder /app/target/release/riffy /usr/local/bin/riffy
 
 # Config is read from the working directory (config.yaml) or RIFFY_* env
 # vars — mount config.yaml into /app; no config is baked into the image.
+#
+# OTLP trace export to Jaeger is opt-in. To enable it in a container, point the
+# exporter at the collector — e.g. in the mounted config.yaml set
+#   logging.otlp: { enabled: true, endpoint: "http://jaeger:4318" }
+# (Jaeger's OTLP/HTTP receiver). reqwest+rustls is built in; no extra packages.
 WORKDIR /app
 
-# Proxy port and admin (healthz + metrics) port; both configurable via config.
-EXPOSE 8080 8081
+# Proxy port and admin (healthz + metrics + UI) port; both configurable via the
+# server.proxy-port / server.admin-port config (defaults 7677 / 7678).
+EXPOSE 7677 7678
 
 USER nonroot
 ENTRYPOINT ["/usr/local/bin/riffy"]

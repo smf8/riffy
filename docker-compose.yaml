@@ -40,5 +40,6 @@ services:
     ports:
       - "16686:16686"   # Jaeger UI
       - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP — riffy's exporter targets this (logging.otlp.endpoint)
     environment:
       - COLLECTOR_OTLP_ENABLED=true
