@@ -3,7 +3,7 @@
 //! durations, per-endpoint thresholds, and the internally tagged storage
 //! backend enum.
 
-use crate::config::{Riffy, StorageBackend, DEFAULT_CONFIG};
+use crate::config::{apply_cli_overrides, CliOverrides, Riffy, StorageBackend, DEFAULT_CONFIG};
 use config::{Config, File, FileFormat};
 use std::time::Duration;
 
@@ -95,4 +95,29 @@ storage:
     // The explicit per-endpoint threshold overrides the diffy defaults.
     assert_eq!(cfg.endpoints[0].threshold.relative, 50.0);
     assert_eq!(cfg.endpoints[0].threshold.absolute, 0.1);
+}
+
+#[test]
+fn cli_overrides_supply_required_fields() {
+    // Embedded defaults + CLI args only (no config file) is enough to run.
+    let cli = CliOverrides {
+        baseline: Some("http://b:1".to_owned()),
+        control: Some("http://c:1".to_owned()),
+        candidate: Some("http://d:1".to_owned()),
+        endpoints: vec!["/x/:id".to_owned()],
+        ..Default::default()
+    };
+    let builder = Config::builder().add_source(File::from_str(DEFAULT_CONFIG, FileFormat::Yaml));
+    let builder = apply_cli_overrides(builder, &cli).unwrap();
+    let cfg: Riffy = builder.build().unwrap().try_deserialize().unwrap();
+
+    assert_eq!(cfg.upstream.baseline, "http://b:1");
+    assert_eq!(cfg.upstream.control, "http://c:1");
+    assert_eq!(cfg.upstream.candidate, "http://d:1");
+    assert_eq!(cfg.endpoints.len(), 1);
+    assert_eq!(cfg.endpoints[0].pattern, "/x/:id");
+    // CLI endpoints fall back to the diffy default thresholds.
+    assert_eq!(cfg.endpoints[0].threshold.relative, 20.0);
+
+    assert!(cfg.validate().is_ok());
 }

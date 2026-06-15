@@ -1,9 +1,27 @@
+use anyhow::Context;
+use config::builder::{ConfigBuilder, DefaultState};
 use config::{Config, Environment, File, FileFormat};
 use serde::Deserialize;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[cfg(test)]
 mod tests;
+
+/// Minimal config values supplied on the command line. These override every
+/// file/env source so an operator can run riffy without a config file.
+#[derive(Debug, Default)]
+pub struct CliOverrides {
+    /// Explicit config file path; when set it replaces the default `config`
+    /// lookup in the working directory.
+    pub config_path: Option<PathBuf>,
+    pub baseline: Option<String>,
+    pub control: Option<String>,
+    pub candidate: Option<String>,
+    /// Endpoint patterns to analyze (each with default thresholds); when
+    /// non-empty they replace the configured endpoint list.
+    pub endpoints: Vec<String>,
+}
 
 /// Built-in defaults, embedded at compile time and layered first. Section
 /// defaults live here rather than in per-field `#[serde(default)]` attributes;
@@ -146,19 +164,67 @@ pub struct Metrics {
     pub port: u16,
 }
 
-pub fn load() -> anyhow::Result<Riffy> {
-    // Layered: embedded defaults are the base, the example file and an optional
-    // `config.yaml` override them, and `RIFFY_`-prefixed env vars override all.
-    // Nested keys use a `__` separator (e.g. `RIFFY_SERVER__PROXY_PORT`).
-    let config: Riffy = Config::builder()
+pub fn load(cli: &CliOverrides) -> anyhow::Result<Riffy> {
+    // Layered, lowest → highest priority: embedded defaults, the example file,
+    // the config file (CLI `--config` path or `config` in the cwd), `RIFFY_`
+    // env vars (nested via a `__` separator, e.g. `RIFFY_SERVER__PROXY_PORT`),
+    // then the CLI value overrides.
+    let mut builder = Config::builder()
         .add_source(File::from_str(DEFAULT_CONFIG, FileFormat::Yaml))
-        .add_source(File::new("config.example", FileFormat::Yaml).required(false))
-        .add_source(File::new("config", FileFormat::Yaml).required(false))
-        .add_source(Environment::with_prefix("RIFFY").separator("__"))
-        .build()?
-        .try_deserialize()?;
+        .add_source(File::new("config.example", FileFormat::Yaml).required(false));
+    builder = match &cli.config_path {
+        Some(path) => builder.add_source(File::from(path.as_path()).required(true)),
+        None => builder.add_source(File::new("config", FileFormat::Yaml).required(false)),
+    };
+    builder = builder.add_source(Environment::with_prefix("RIFFY").separator("__"));
+    builder = apply_cli_overrides(builder, cli)?;
+
+    let config: Riffy = builder.build()?.try_deserialize()?;
     config.validate()?;
     Ok(config)
+}
+
+/// Layer the CLI value overrides onto the config builder as the highest-priority
+/// source. Built as JSON (via serde_json, so values are escaped correctly) and
+/// merged like any other source: scalar upstream fields deep-merge, the
+/// endpoint list replaces.
+pub(crate) fn apply_cli_overrides(
+    builder: ConfigBuilder<DefaultState>,
+    cli: &CliOverrides,
+) -> anyhow::Result<ConfigBuilder<DefaultState>> {
+    use serde_json::{json, Map, Value};
+
+    let mut root = Map::new();
+
+    let mut upstream = Map::new();
+    if let Some(v) = &cli.baseline {
+        upstream.insert("baseline".to_owned(), json!(v));
+    }
+    if let Some(v) = &cli.control {
+        upstream.insert("control".to_owned(), json!(v));
+    }
+    if let Some(v) = &cli.candidate {
+        upstream.insert("candidate".to_owned(), json!(v));
+    }
+    if !upstream.is_empty() {
+        root.insert("upstream".to_owned(), Value::Object(upstream));
+    }
+
+    if !cli.endpoints.is_empty() {
+        let endpoints: Vec<Value> = cli
+            .endpoints
+            .iter()
+            .map(|p| json!({ "pattern": p }))
+            .collect();
+        root.insert("endpoints".to_owned(), Value::Array(endpoints));
+    }
+
+    if root.is_empty() {
+        return Ok(builder);
+    }
+
+    let json = serde_json::to_string(&Value::Object(root)).context("serializing CLI overrides")?;
+    Ok(builder.add_source(File::from_str(&json, FileFormat::Json)))
 }
 
 impl Riffy {

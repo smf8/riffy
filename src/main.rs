@@ -3,21 +3,54 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use anyhow::Context;
+use clap::Parser;
 use riffy::analysis::classify::EndpointClassifiers;
 use riffy::analysis::counters::LiveCounters;
-use riffy::config::StorageBackend;
+use riffy::config::{CliOverrides, StorageBackend};
 use riffy::endpoint::EndpointMatcher;
 use riffy::http::router::{admin_router, create_router, AdminState, AppState};
 use riffy::pipeline::consumer::Consumer;
 use riffy::storage::{DiffStore, InMemoryDiffStore, RedisDiffStore};
 use riffy::upstream::UpstreamClient;
 use riffy::{config, pipeline, telemetry};
+use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Riffy — reverse proxy with diffy-style statistical regression detection.
+#[derive(Parser, Debug)]
+#[command(name = "riffy", version, about)]
+struct Cli {
+    /// Path to a YAML config file. Overrides the default `config.yaml` lookup
+    /// in the working directory.
+    #[arg(short, long, value_name = "PATH")]
+    config: Option<PathBuf>,
+    /// Baseline upstream address (e.g. http://localhost:9100).
+    #[arg(long, value_name = "ADDR")]
+    baseline: Option<String>,
+    /// Control upstream address.
+    #[arg(long, value_name = "ADDR")]
+    control: Option<String>,
+    /// Candidate upstream address.
+    #[arg(long, value_name = "ADDR")]
+    candidate: Option<String>,
+    /// Endpoint pattern to analyze; repeat for multiple (e.g.
+    /// --endpoint /api/v1/users/:id). Replaces the configured endpoint list.
+    #[arg(long = "endpoint", value_name = "PATTERN")]
+    endpoints: Vec<String>,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load config
-    let cfg = config::load()?;
+    let cli = Cli::parse();
+
+    // Load config (files + env + CLI overrides)
+    let cfg = config::load(&CliOverrides {
+        config_path: cli.config,
+        baseline: cli.baseline,
+        control: cli.control,
+        candidate: cli.candidate,
+        endpoints: cli.endpoints,
+    })?;
     let tracer_provider = telemetry::init_tracing(&cfg.logging)?;
 
     tracing::info!(service = riffy::SERVICE_NAME, "starting riffy");
