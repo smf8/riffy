@@ -8,10 +8,11 @@ responses are diffed against the baseline asynchronously. Fields where
 baseline-vs-candidate disagreement (**raw**) significantly exceeds
 baseline-vs-control disagreement (**noise**) are flagged as real regressions.
 
-This document describes what the code *does today*. Where it deviates from
-`Plan.md`, the deviation is recorded as a numbered revision (R#) in
-`Progress.md`. To update this doc, use the `update-architecture-doc` skill in
-`.claude/skills/`.
+This document describes what the code *does today* and is the single source of
+truth for the runtime architecture. The inline `(R#)` tags mark deliberate
+design decisions made along the way — historical markers, not entries in a
+separate changelog. To update this doc, use the `update-architecture-doc` skill
+in `.claude/skills/`.
 
 ## Request & Analysis DAG
 
@@ -37,7 +38,7 @@ flowchart TD
 
     subgraph background ["Background task, one per request (src/http/forward.rs)"]
         fanout["tokio::join!<br/>CANDIDATE + CONTROL in parallel<br/>(src/upstream/client.rs)"]
-        send["try_send AnalysisMessage<br/>bounded mpsc, capacity 1024;<br/>drop newest + warn when full (R12)<br/>(src/pipeline/mod.rs)"]
+        send["try_send AnalysisMessage<br/>bounded mpsc, capacity = pipeline.channel-capacity<br/>(default 1024, R32); drop newest + warn when full (R12)<br/>(src/pipeline/mod.rs)"]
         fanout --> send
     end
 
@@ -50,7 +51,7 @@ flowchart TD
         statuscheck{"per upstream:<br/>responded with same<br/>status as baseline? (R23)"}
         diff["parse body, then flatten_value:<br/>diff → flatten to dot-paths<br/>raw = baseline vs candidate<br/>noise = baseline vs control<br/>(src/compare/)"]
         nodiff["body not compared —<br/>empty diff map; a status mismatch<br/>is itself the signal (R23)"]
-        record["DiffCounters.record<br/>DashMap + AtomicU64 counters:<br/>endpoint total, per-field raw / noise<br/>(src/analysis/counters.rs)"]
+        record["LiveCounters.record<br/>DashMap + AtomicU64 write buffer:<br/>endpoint total, per-field raw / noise<br/>(src/analysis/counters.rs)"]
         decide{"any raw/noise diffs,<br/>or upstream status mismatch?"}
         entry["DiffEntry (R13)"]
         skip(["no stream entry —<br/>only counters moved"])
@@ -61,8 +62,8 @@ flowchart TD
         decide -- "yes" --> entry
         decide -- "no" --> skip
 
-        ticker["interval ticker — buffer flush<br/>aggregation-interval (1s default) (R29/R31)<br/>+ one final flush on shutdown (R19)"]
-        snapshot["collector.snapshot →<br/>raw counts per field, no classification<br/>(src/analysis/snapshot.rs)"]
+        ticker["interval ticker — buffer drain<br/>aggregation-interval (1s default) (R29/R31)<br/>+ one final drain on shutdown (R19)"]
+        snapshot["LiveCounters.drain →<br/>raw count deltas per field (counters reset);<br/>restored to buffer on store-write failure (R32)<br/>(src/analysis/counters.rs)"]
         ticker --> snapshot
     end
 
@@ -71,7 +72,7 @@ flowchart TD
 
     subgraph store ["DiffStore trait (src/storage/mod.rs, R25) — RedisDiffStore (redis.rs) / InMemoryDiffStore, the default when redis config is absent (memory.rs, R29)"]
         xadd[("XADD riffy:diffs<br/>per-request diff entry")]
-        hset[("HSET riffy:agg:{endpoint}<br/>raw counts only, pipelined, one RTT (R15/R31)")]
+        hset[("HINCRBY riffy:agg:{endpoint}<br/>add deltas: total + raw:{path}/noise:{path};<br/>atomic pipeline, sums across instances, one RTT (R32)")]
     end
 ```
 
@@ -81,8 +82,8 @@ acyclic: the ticker is an independent root, not a back-edge.
 
 ## Admin server (observability + query API)
 
-The admin server carries `AdminState { metrics, store }` (R29); `FromRef`
-hands each route only the substate it needs. The query API reads the same
+The admin server carries `AdminState { metrics, store, classifier }` (R29/R31);
+`FromRef` hands each route only the substate it needs. The query API reads the same
 `DiffStore` the consumer writes to, so it reflects the periodic aggregation
 snapshots (staleness ≤ the aggregation interval) and the per-request stream.
 
@@ -107,10 +108,10 @@ relative/absolute percentages are derived in `diff_detail` at read time via
 `RegressionClassifier` (held in `AdminState`), so changing a threshold
 reclassifies everything instantly with no re-flush. Read methods on `DiffStore`
 (analysis-side only, never the hot path): `get_aggregation` (HGETALL one
-`riffy:agg:{endpoint}` hash), `list_aggregations` (cursor SCAN `riffy:agg:*` +
-pipelined HGETALL), `recent_samples` (paged, newest-first XREVRANGE over
-`riffy:diffs`, filtered to one endpoint + field path, `offset`/`limit`
-paginated).
+`riffy:agg:{endpoint}` hash, regrouping the flat `raw:{path}`/`noise:{path}`
+entries by path), `list_aggregations` (cursor SCAN `riffy:agg:*` + pipelined
+HGETALL), `recent_samples` (paged, newest-first XREVRANGE over `riffy:diffs`,
+filtered to one endpoint + field path, `offset`/`limit` paginated).
 
 | Query route | Response |
 |-------------|----------|
@@ -150,14 +151,20 @@ status mismatch:
 `diff_type` is one of `primitive`, `missing_field`, `extra_field`, `seq_size`,
 `ordering`, `type_mismatch` (`src/compare/flatten.rs`).
 
-**Aggregation hash** (`HSET riffy:agg:{endpoint}`), rewritten every
-`redis.aggregation-interval`:
+**Aggregation hash** (`riffy:agg:{endpoint}`), counts incremented with `HINCRBY`
+every `aggregation-interval` so concurrent instances sum into the same hash
+instead of overwriting (R32):
 
 | Field | Content |
 |-------|---------|
-| `total` | requests analyzed for this endpoint |
-| `fields` | JSON: `{ "<dot.path>": { "raw_count", "noise_count" } }` — raw counts only; `is_regression` is derived at read time (R31), not stored |
-| `last_updated` | RFC 3339 (last buffer flush) |
+| `total` | requests analyzed for this endpoint (cumulative) |
+| `raw:{dot.path}` | baseline-vs-candidate diff count at that path |
+| `noise:{dot.path}` | baseline-vs-control diff count at that path |
+| `last_updated` | RFC 3339 (last buffer drain) |
+
+Per-field counts are flat hash entries (not a JSON blob) so `HINCRBY` can target
+them atomically; `is_regression` and the relative/absolute percentages are
+derived at read time (R31), never stored.
 
 ## Invariants (do not regress)
 

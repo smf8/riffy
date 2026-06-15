@@ -45,7 +45,7 @@ async fn get_and_list_aggregations() {
         },
     );
     store
-        .write_aggregation(&[
+        .add_aggregation(&[
             EndpointAggregation {
                 endpoint: "/api/v1/users/:id".to_owned(),
                 total: 10,
@@ -74,6 +74,39 @@ async fn get_and_list_aggregations() {
 
     let all = store.list_aggregations().await.unwrap();
     assert_eq!(all.len(), 2);
+}
+
+#[tokio::test]
+async fn add_aggregation_accumulates_rather_than_overwrites() {
+    let store = InMemoryDiffStore::new();
+
+    let delta = |total: u64, raw: u64, noise: u64| {
+        let mut fields = HashMap::new();
+        fields.insert(
+            "user.name".to_owned(),
+            FieldAggregation {
+                raw_count: raw,
+                noise_count: noise,
+            },
+        );
+        vec![EndpointAggregation {
+            endpoint: "/e".to_owned(),
+            total,
+            fields,
+            last_updated: Utc::now(),
+        }]
+    };
+
+    store.add_aggregation(&delta(10, 4, 1)).await.unwrap();
+    store.add_aggregation(&delta(5, 2, 3)).await.unwrap();
+
+    // Two flushes must sum, not clobber — this is what lets multiple instances
+    // share one backend without losing each other's counts.
+    let got = store.get_aggregation("/e").await.unwrap().unwrap();
+    assert_eq!(got.total, 15);
+    let field = got.fields.get("user.name").unwrap();
+    assert_eq!(field.raw_count, 6);
+    assert_eq!(field.noise_count, 4);
 }
 
 #[tokio::test]

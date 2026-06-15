@@ -13,6 +13,8 @@ mod tests;
 pub struct Riffy {
     pub service_name: String,
     pub proxy: Proxy,
+    #[serde(default)]
+    pub pipeline: Pipeline,
     pub upstream: Upstream,
     pub threshold: Threshold,
     pub endpoints: Vec<EndpointPattern>,
@@ -31,6 +33,28 @@ pub struct Proxy {
     pub port: u16,
     #[serde(default)]
     pub allow_http_side_effects: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Pipeline {
+    /// Bounded capacity of the proxy → analysis-consumer channel. When the
+    /// consumer falls behind, new messages are dropped with a warning
+    /// (backpressure by shedding, never unbounded queueing).
+    #[serde(default = "default_channel_capacity")]
+    pub channel_capacity: usize,
+}
+
+fn default_channel_capacity() -> usize {
+    1024
+}
+
+impl Default for Pipeline {
+    fn default() -> Self {
+        Self {
+            channel_capacity: default_channel_capacity(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,6 +214,10 @@ impl Riffy {
         ensure!(
             self.proxy.port != self.server.port,
             "proxy.port and server.port must differ"
+        );
+        ensure!(
+            self.pipeline.channel_capacity > 0,
+            "pipeline.channel-capacity must be > 0"
         );
         if let Some(redis) = &self.redis {
             ensure!(!redis.uri.trim().is_empty(), "redis.uri must not be empty");

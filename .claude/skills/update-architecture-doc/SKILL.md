@@ -7,9 +7,8 @@ description: Use after any change to riffy's request flow, module wiring, pipeli
 
 `docs/architecture.md` is the single runtime-truth document: a Mermaid DAG of
 the request/analysis flow plus tables for metrics and Redis data. It describes
-what the code **does today** — not what `Plan.md` planned. When they disagree,
-the doc follows the code and cites the revision number (R#) from
-`Progress.md`.
+what the code **does today**; when the doc and the code disagree, the doc is
+wrong — fix it to follow the code.
 
 ## When an update is required
 
@@ -36,10 +35,10 @@ the doc follows the code and cites the revision number (R#) from
    - Redis keys/fields: `grep -rn 'xadd\|hset\|stream_key\|aggregation_key_prefix' src/storage/`
    - config keys: check `src/config/mod.rs` (kebab-case serde renames) and `config.example.yaml`
    - file paths named in node labels: confirm each file still exists.
-5. If the architecture deviated from `Plan.md`, add a numbered revision row to
-   `Progress.md` first, then cite that R# in the doc.
-6. Update `Progress.md` "Notes for Next Session" (session checklist applies to
-   doc work too).
+5. If a change reflects a deliberate, non-obvious design decision, you may tag
+   the affected node/row inline with the next `(R#)` marker for traceability.
+   These are lightweight historical markers — there is no separate changelog to
+   maintain.
 
 ## Diagram conventions
 
@@ -73,12 +72,11 @@ the doc follows the code and cites the revision number (R#) from
 5. **Dependencies appear in the doc only after the user approved them** (crate
    policy). Example: body decompression was documented only after the user
    chose async-compression (R20). Never document a speculative crate choice.
-6. **Deviations are revisions.** The user tracks every architecture deviation
-   as a numbered R# row in `Progress.md`; the doc references those numbers
-   instead of re-explaining history.
+6. **`(R#)` tags are historical markers.** They flag deliberate past decisions
+   inline; keep existing ones stable (don't renumber or delete them), and there
+   is no separate log to update.
 7. **Concise over exhaustive.** The doc is a map, not a mirror: one DAG,
-   short tables, a hard-invariants list. Don't paste code into it, and don't
-   duplicate `Plan.md` content.
+   short tables, a hard-invariants list. Don't paste code into it.
 8. If the same change also touched code, the usual gate applies before the
    work is complete: `make format && make lint` (zero warnings) and
    `make test`.

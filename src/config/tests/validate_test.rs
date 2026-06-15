@@ -8,6 +8,9 @@ fn valid_config() -> Riffy {
             port: 8880,
             allow_http_side_effects: false,
         },
+        pipeline: Pipeline {
+            channel_capacity: 1024,
+        },
         upstream: Upstream {
             baseline: "localhost:9100".to_owned(),
             control: "localhost:9200".to_owned(),
@@ -101,4 +104,11 @@ fn absent_redis_section_is_valid() {
     let mut cfg = valid_config();
     cfg.redis = None;
     assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn zero_channel_capacity_fails() {
+    let mut cfg = valid_config();
+    cfg.pipeline.channel_capacity = 0;
+    assert!(cfg.validate().is_err());
 }

@@ -13,9 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::analysis::classify::RegressionClassifier;
-use crate::analysis::snapshot::FieldSnapshot;
 use crate::error::AppError;
-use crate::storage::{DiffStore, EndpointAggregation, SamplePage};
+use crate::storage::{DiffStore, EndpointAggregation, FieldAggregation, SamplePage};
 
 const DEFAULT_SAMPLE_LIMIT: usize = 20;
 const MAX_SAMPLE_LIMIT: usize = 100;
@@ -133,13 +132,11 @@ pub async fn diff_detail(
 
     // Derive the verdict and percentages from the stored raw counts at read
     // time against the live thresholds (the store persists counts only).
-    let joined = FieldSnapshot {
-        path: query.path.clone(),
+    let counts = FieldAggregation {
         raw_count,
         noise_count,
-        endpoint_total: total,
     };
-    let is_regression = classifier.is_regression(&joined);
+    let is_regression = classifier.is_regression(&counts, total);
 
     Ok(Json(DiffDetail {
         endpoint: query.endpoint,
@@ -148,8 +145,8 @@ pub async fn diff_detail(
         raw_count,
         noise_count,
         is_regression,
-        relative_difference: joined.relative_difference(),
-        absolute_difference: joined.absolute_difference(),
+        relative_difference: counts.relative_difference(),
+        absolute_difference: counts.absolute_difference(total),
         last_updated,
         samples,
     })

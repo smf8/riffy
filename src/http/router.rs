@@ -1,3 +1,4 @@
+use super::{forward, query};
 use crate::analysis::classify::RegressionClassifier;
 use crate::config::Riffy;
 use crate::endpoint::EndpointMatcher;
@@ -11,8 +12,6 @@ use axum::{middleware, Router};
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-
-use super::{forward, query};
 
 #[derive(Clone)]
 pub struct AppState {

@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::analysis::counters::LiveCounters;
-use crate::analysis::DiffCounters;
 use crate::endpoint::EndpointMatcher;
 use crate::pipeline::consumer::Consumer;
 use crate::pipeline::AnalysisMessage;
@@ -35,12 +34,12 @@ fn message(
 }
 
 /// Run a consumer over the given messages until the channel closes, then
-/// return the store and collector for assertions. The aggregation interval is
-/// long so only the final shutdown flush writes snapshots.
-async fn run_consumer(
-    messages: Vec<AnalysisMessage>,
-) -> (Arc<InMemoryDiffStore>, Arc<LiveCounters>) {
-    let (tx, rx) = crate::pipeline::channel();
+/// return the store for assertions. The aggregation interval is long, so the
+/// only flush is the final shutdown drain — which moves all buffered counts
+/// into the store. All count assertions therefore read the store, matching the
+/// "all reads go through the store" design.
+async fn run_consumer(messages: Vec<AnalysisMessage>) -> Arc<InMemoryDiffStore> {
+    let (tx, rx) = crate::pipeline::channel(1024);
     let collector = Arc::new(LiveCounters::new());
     let store = Arc::new(InMemoryDiffStore::new());
     let matcher = Arc::new(EndpointMatcher::new(&["/api/v1/users/:id".to_owned()]));
@@ -48,7 +47,7 @@ async fn run_consumer(
     let handle = Consumer::new(
         rx,
         matcher,
-        collector.clone(),
+        collector,
         store.clone(),
         Duration::from_secs(3600),
     )
@@ -60,12 +59,12 @@ async fn run_consumer(
     drop(tx);
     handle.await.unwrap();
 
-    (store, collector)
+    store
 }
 
 #[tokio::test]
 async fn writes_diff_entry_for_differing_responses() {
-    let (store, _) = run_consumer(vec![message(
+    let store = run_consumer(vec![message(
         "/api/v1/users/42",
         r#"{"name": "alice"}"#,
         Some(r#"{"name": "bob"}"#),
@@ -88,7 +87,7 @@ async fn writes_diff_entry_for_differing_responses() {
 #[tokio::test]
 async fn identical_responses_produce_no_entry_but_count_total() {
     let body = r#"{"a": 1}"#;
-    let (store, collector) = run_consumer(vec![message(
+    let store = run_consumer(vec![message(
         "/api/v1/users/1",
         body,
         Some(body),
@@ -98,8 +97,10 @@ async fn identical_responses_produce_no_entry_but_count_total() {
 
     assert!(store.entries().await.is_empty());
 
-    let snapshot = collector.snapshot();
-    assert_eq!(snapshot[0].total, 1);
+    // The request still counts toward the endpoint total (flushed to the store).
+    let aggregation = store.aggregation("/api/v1/users/:id").await.unwrap();
+    assert_eq!(aggregation.total, 1);
+    assert!(aggregation.fields.is_empty());
 }
 
 #[tokio::test]
@@ -108,7 +109,7 @@ async fn status_mismatch_alone_produces_entry() {
     let mut msg = message("/api/v1/users/1", body, Some(body), Some(body));
     msg.candidate_response.as_mut().unwrap().status = 500;
 
-    let (store, _) = run_consumer(vec![msg]).await;
+    let store = run_consumer(vec![msg]).await;
 
     let entries = store.entries().await;
     assert_eq!(entries.len(), 1);
@@ -128,21 +129,21 @@ async fn mismatched_status_skips_body_comparison() {
     );
     msg.candidate_response.as_mut().unwrap().status = 503;
 
-    let (store, collector) = run_consumer(vec![msg]).await;
+    let store = run_consumer(vec![msg]).await;
 
     let entries = store.entries().await;
     assert_eq!(entries.len(), 1);
     assert!(entries[0].raw_fields.is_empty());
     assert_eq!(entries[0].candidate_status, Some(503));
     // No field counters moved, only the endpoint total.
-    let snapshot = collector.snapshot();
-    assert_eq!(snapshot[0].total, 1);
-    assert!(snapshot[0].fields.is_empty());
+    let aggregation = store.aggregation("/api/v1/users/:id").await.unwrap();
+    assert_eq!(aggregation.total, 1);
+    assert!(aggregation.fields.is_empty());
 }
 
 #[tokio::test]
 async fn invalid_candidate_json_is_skipped() {
-    let (store, collector) = run_consumer(vec![message(
+    let store = run_consumer(vec![message(
         "/api/v1/users/1",
         r#"{"a": 1}"#,
         Some("<html>"),
@@ -151,12 +152,13 @@ async fn invalid_candidate_json_is_skipped() {
     .await;
 
     assert!(store.entries().await.is_empty());
-    assert_eq!(collector.snapshot()[0].total, 1);
+    let aggregation = store.aggregation("/api/v1/users/:id").await.unwrap();
+    assert_eq!(aggregation.total, 1);
 }
 
 #[tokio::test]
 async fn missing_candidate_yields_entry_with_noise_only() {
-    let (store, _) = run_consumer(vec![message(
+    let store = run_consumer(vec![message(
         "/api/v1/users/1",
         r#"{"a": 1}"#,
         None,
@@ -173,7 +175,7 @@ async fn missing_candidate_yields_entry_with_noise_only() {
 
 #[tokio::test]
 async fn final_flush_writes_aggregation_snapshot() {
-    let (store, _) = run_consumer(vec![
+    let store = run_consumer(vec![
         message(
             "/api/v1/users/1",
             r#"{"n": 1}"#,
@@ -201,11 +203,11 @@ async fn final_flush_writes_aggregation_snapshot() {
 
 #[tokio::test]
 async fn non_json_baseline_is_skipped_entirely() {
-    let (store, collector) =
-        run_consumer(vec![message("/x", "<html>", Some(r#"{"a": 1}"#), None)]).await;
+    let store = run_consumer(vec![message("/x", "<html>", Some(r#"{"a": 1}"#), None)]).await;
 
     assert!(store.entries().await.is_empty());
-    assert!(collector.snapshot().is_empty());
+    // Never recorded, so nothing was flushed for this endpoint.
+    assert!(store.aggregation("/x").await.is_none());
 }
 
 #[tokio::test]
@@ -226,7 +228,7 @@ async fn gzip_baseline_is_decompressed_and_analyzed() {
         "gzip".parse().unwrap(),
     );
 
-    let (store, _) = run_consumer(vec![msg]).await;
+    let store = run_consumer(vec![msg]).await;
 
     let entries = store.entries().await;
     assert_eq!(entries.len(), 1);
@@ -241,15 +243,15 @@ async fn unsupported_encoding_on_baseline_is_skipped() {
         "compress".parse().unwrap(),
     );
 
-    let (store, collector) = run_consumer(vec![msg]).await;
+    let store = run_consumer(vec![msg]).await;
 
     assert!(store.entries().await.is_empty());
-    assert!(collector.snapshot().is_empty());
+    assert!(store.aggregation("/x").await.is_none());
 }
 
 #[tokio::test]
 async fn unmatched_path_uses_raw_path_as_endpoint() {
-    let (store, _) = run_consumer(vec![message(
+    let store = run_consumer(vec![message(
         "/other/route?q=1",
         r#"{"a": 1}"#,
         Some(r#"{"a": 2}"#),

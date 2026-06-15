@@ -10,7 +10,9 @@ use std::time::Duration;
 use axum::routing::any;
 use axum::{Json, Router};
 use riffy::analysis::counters::LiveCounters;
-use riffy::config::{EndpointPattern, Logging, Metrics, Proxy, Riffy, Server, Threshold, Upstream};
+use riffy::config::{
+    EndpointPattern, Logging, Metrics, Pipeline, Proxy, Riffy, Server, Threshold, Upstream,
+};
 use riffy::endpoint::EndpointMatcher;
 use riffy::http::router::{create_router, AppState};
 use riffy::pipeline::consumer::Consumer;
@@ -36,6 +38,9 @@ fn test_config() -> Riffy {
         proxy: Proxy {
             port: 0,
             allow_http_side_effects: false,
+        },
+        pipeline: Pipeline {
+            channel_capacity: 1024,
         },
         upstream: Upstream {
             baseline: String::new(),
@@ -88,7 +93,7 @@ async fn spawn_proxy(
         Duration::from_secs(5),
     );
 
-    let (analysis_tx, analysis_rx) = riffy::pipeline::channel();
+    let (analysis_tx, analysis_rx) = riffy::pipeline::channel(1024);
     let collector = Arc::new(LiveCounters::new());
     let store = Arc::new(InMemoryDiffStore::new());
     let matcher = Arc::new(EndpointMatcher::new(&["/api/v1/users/:id".to_owned()]));

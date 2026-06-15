@@ -47,7 +47,7 @@ async fn list_paths_lists_all_endpoints_and_filters_by_endpoint() {
     users_fields.insert("user.name".to_owned(), field(5, 1));
     users_fields.insert("user.email".to_owned(), field(2, 0));
     store
-        .write_aggregation(&[
+        .add_aggregation(&[
             EndpointAggregation {
                 endpoint: "/api/v1/users/:id".to_owned(),
                 total: 100,
@@ -113,7 +113,7 @@ async fn diff_detail_returns_stats_and_paginated_samples() {
     let mut fields = HashMap::new();
     fields.insert("user.name".to_owned(), field(3, 0));
     store
-        .write_aggregation(&[EndpointAggregation {
+        .add_aggregation(&[EndpointAggregation {
             endpoint: "/api/v1/users/:id".to_owned(),
             total: 3,
             fields,

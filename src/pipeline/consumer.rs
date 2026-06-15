@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use super::decode::decode_body;
 use super::AnalysisMessage;
-use crate::analysis::DiffCounters;
+use crate::analysis::counters::LiveCounters;
 use crate::compare::flatten::{flatten_value, FieldDiff};
 use crate::endpoint::EndpointMatcher;
-use crate::storage::{DiffEntry, DiffStore, EndpointAggregation, FieldAggregation};
+use crate::storage::{DiffEntry, DiffStore};
 use crate::upstream::client::UpstreamResponse;
 use chrono::Utc;
 use serde_json::Value;
@@ -23,7 +23,7 @@ use tokio::time::MissedTickBehavior;
 pub struct Consumer {
     rx: mpsc::Receiver<AnalysisMessage>,
     matcher: Arc<EndpointMatcher>,
-    collector: Arc<dyn DiffCounters>,
+    collector: Arc<LiveCounters>,
     store: Arc<dyn DiffStore>,
     aggregation_interval: Duration,
 }
@@ -32,7 +32,7 @@ impl Consumer {
     pub fn new(
         rx: mpsc::Receiver<AnalysisMessage>,
         matcher: Arc<EndpointMatcher>,
-        collector: Arc<dyn DiffCounters>,
+        collector: Arc<LiveCounters>,
         store: Arc<dyn DiffStore>,
         aggregation_interval: Duration,
     ) -> Self {
@@ -123,38 +123,18 @@ impl Consumer {
     }
 
     async fn flush_aggregation(&self) {
-        let snapshots = self.collector.snapshot();
-        if snapshots.is_empty() {
+        // Drain the buffered count deltas and add them to the store. Raw counts
+        // only — the regression verdict is computed at read time, so the flush
+        // stays a cheap buffer drain. On a store failure the deltas are pushed
+        // back into the buffer so the next flush retries them (no lost counts).
+        let deltas = self.collector.drain();
+        if deltas.is_empty() {
             return;
         }
 
-        let now = Utc::now();
-        let aggregations: Vec<EndpointAggregation> = snapshots
-            .into_iter()
-            .map(|snapshot| EndpointAggregation {
-                endpoint: snapshot.endpoint,
-                total: snapshot.total,
-                // Raw counts only; the regression verdict is computed at read
-                // time, so the flush stays a cheap buffer drain.
-                fields: snapshot
-                    .fields
-                    .into_iter()
-                    .map(|field| {
-                        (
-                            field.path,
-                            FieldAggregation {
-                                raw_count: field.raw_count,
-                                noise_count: field.noise_count,
-                            },
-                        )
-                    })
-                    .collect(),
-                last_updated: now,
-            })
-            .collect();
-
-        if let Err(e) = self.store.write_aggregation(&aggregations).await {
-            tracing::warn!(error = %e, "failed to write aggregation snapshot");
+        if let Err(e) = self.store.add_aggregation(&deltas).await {
+            tracing::warn!(error = %e, "failed to add aggregation; restoring counters for retry");
+            self.collector.restore(&deltas);
         }
     }
 }

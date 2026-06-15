@@ -32,13 +32,24 @@ impl DiffStore for InMemoryDiffStore {
         Ok(())
     }
 
-    async fn write_aggregation(
-        &self,
-        aggregations: &[EndpointAggregation],
-    ) -> Result<(), StoreError> {
+    async fn add_aggregation(&self, deltas: &[EndpointAggregation]) -> Result<(), StoreError> {
         let mut map = self.aggregations.lock().await;
-        for aggregation in aggregations {
-            map.insert(aggregation.endpoint.clone(), aggregation.clone());
+        for delta in deltas {
+            let entry = map
+                .entry(delta.endpoint.clone())
+                .or_insert_with(|| EndpointAggregation {
+                    endpoint: delta.endpoint.clone(),
+                    total: 0,
+                    fields: HashMap::new(),
+                    last_updated: delta.last_updated,
+                });
+            entry.total += delta.total;
+            entry.last_updated = delta.last_updated;
+            for (path, field_delta) in &delta.fields {
+                let field = entry.fields.entry(path.clone()).or_default();
+                field.raw_count += field_delta.raw_count;
+                field.noise_count += field_delta.noise_count;
+            }
         }
         Ok(())
     }

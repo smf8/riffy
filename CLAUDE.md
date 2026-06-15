@@ -8,10 +8,7 @@
 
 ## Session Start Checklist
 
-**Before doing any work**, always:
-1. Read `Plan.md` — understand the full architecture, algorithms, and data model.
-2. Read `Progress.md` — identify the current phase and which tasks remain. Only work within the current phase unless explicitly told otherwise.
-3. After completing any work, update `Progress.md` checkboxes and add a note under "Notes for Next Session".
+**Before doing any work**, read `docs/architecture.md` — it is the source of truth for the runtime architecture: the request/analysis DAG, the storage model, the query API, and the **invariants that must not regress**. Whenever you change the runtime architecture, keep that doc current via the `update-architecture-doc` skill in `.claude/skills/`.
 
 ---
 
@@ -121,19 +118,3 @@ Examples:
 - Write **integration tests** for the proxy handler and pipeline consumer.
 - Tests live in separate files — never co-located with implementation code.
 - Use `make test` to run the full suite.
-
----
-
-## Implementation Phases Reference
-
-Work is organized into phases defined in `Progress.md`. Always check the current phase before starting:
-
-| Phase | Scope |
-|-------|-------|
-| 1 | Skeleton + Proxy ✅ |
-| 2 | Diff Engine |
-| 3 | Analysis Pipeline |
-| 4 | Redis Output |
-| 5 | Observability + Hardening |
-
-**Do not implement work from a future phase** unless explicitly instructed.

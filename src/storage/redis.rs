@@ -67,30 +67,35 @@ impl DiffStore for RedisDiffStore {
         Ok(())
     }
 
-    async fn write_aggregation(
-        &self,
-        aggregations: &[EndpointAggregation],
-    ) -> Result<(), StoreError> {
-        if aggregations.is_empty() {
+    async fn add_aggregation(&self, deltas: &[EndpointAggregation]) -> Result<(), StoreError> {
+        if deltas.is_empty() {
             return Ok(());
         }
 
-        // One pipelined round-trip for all endpoints.
+        // One atomic (MULTI/EXEC), pipelined round-trip for all endpoints. Each
+        // count is an HINCRBY so concurrent instances sum into the same hash
+        // instead of overwriting; per-field counts live as flat `raw:{path}` /
+        // `noise:{path}` hash entries so HINCRBY can target them directly.
+        // Atomic so a reader never observes a half-applied flush.
         let mut pipe = ::redis::pipe();
-        for aggregation in aggregations {
-            let fields_json =
-                serde_json::to_string(&aggregation.fields).map_err(StoreError::Serialize)?;
-            let key = format!("{}:{}", self.aggregation_key_prefix, aggregation.endpoint);
-
-            pipe.hset_multiple(
-                &key,
-                &[
-                    ("total", aggregation.total.to_string()),
-                    ("fields", fields_json),
-                    ("last_updated", aggregation.last_updated.to_rfc3339()),
-                ],
-            )
-            .ignore();
+        pipe.atomic();
+        for delta in deltas {
+            let key = format!("{}:{}", self.aggregation_key_prefix, delta.endpoint);
+            if delta.total > 0 {
+                pipe.hincr(&key, "total", delta.total).ignore();
+            }
+            for (path, field) in &delta.fields {
+                if field.raw_count > 0 {
+                    pipe.hincr(&key, format!("raw:{path}"), field.raw_count)
+                        .ignore();
+                }
+                if field.noise_count > 0 {
+                    pipe.hincr(&key, format!("noise:{path}"), field.noise_count)
+                        .ignore();
+                }
+            }
+            pipe.hset(&key, "last_updated", delta.last_updated.to_rfc3339())
+                .ignore();
         }
 
         let mut conn = self.conn.clone();
@@ -225,31 +230,58 @@ impl DiffStore for RedisDiffStore {
 }
 
 /// Reconstruct an `EndpointAggregation` from a `riffy:agg:{endpoint}` hash.
+/// `total` and `last_updated` are reserved keys; every other key is a
+/// `raw:{path}` / `noise:{path}` per-field counter that is regrouped by path.
 fn parse_aggregation(
     endpoint: String,
     map: &HashMap<String, String>,
 ) -> Result<EndpointAggregation, StoreError> {
-    let total = map
-        .get("total")
-        .ok_or_else(|| StoreError::Corrupt(format!("aggregation '{endpoint}' missing 'total'")))?
-        .parse::<u64>()
-        .map_err(|e| StoreError::Corrupt(format!("aggregation '{endpoint}' invalid total: {e}")))?;
+    let mut total = 0u64;
+    let mut last_updated: Option<DateTime<Utc>> = None;
+    let mut fields: HashMap<String, FieldAggregation> = HashMap::new();
 
-    let fields: HashMap<String, FieldAggregation> = match map.get("fields") {
-        Some(json) => serde_json::from_str(json).map_err(StoreError::Deserialize)?,
-        None => HashMap::new(),
-    };
+    for (key, value) in map {
+        match key.as_str() {
+            "total" => {
+                total = value.parse::<u64>().map_err(|e| {
+                    StoreError::Corrupt(format!("aggregation '{endpoint}' invalid total: {e}"))
+                })?;
+            }
+            "last_updated" => {
+                last_updated = Some(
+                    DateTime::parse_from_rfc3339(value)
+                        .map_err(|e| {
+                            StoreError::Corrupt(format!(
+                                "aggregation '{endpoint}' invalid last_updated: {e}"
+                            ))
+                        })?
+                        .with_timezone(&Utc),
+                );
+            }
+            other => {
+                // Split only on the first ':' so paths may themselves contain ':'.
+                let (kind, path) = match other.split_once(':') {
+                    Some(parts) => parts,
+                    None => continue, // unknown/stale field — ignore
+                };
+                let count = value.parse::<u64>().map_err(|e| {
+                    StoreError::Corrupt(format!(
+                        "aggregation '{endpoint}' field '{other}' invalid count: {e}"
+                    ))
+                })?;
+                let field = fields.entry(path.to_owned()).or_default();
+                match kind {
+                    "raw" => field.raw_count = count,
+                    "noise" => field.noise_count = count,
+                    _ => continue, // unknown prefix — ignore
+                }
+            }
+        }
+    }
 
-    let last_updated = map.get("last_updated").ok_or_else(|| {
+    let last_updated = last_updated.ok_or_else(|| {
         StoreError::Corrupt(format!("aggregation '{endpoint}' missing 'last_updated'"))
     })?;
-    let last_updated = DateTime::parse_from_rfc3339(last_updated)
-        .map_err(|e| {
-            StoreError::Corrupt(format!(
-                "aggregation '{endpoint}' invalid last_updated: {e}"
-            ))
-        })?
-        .with_timezone(&Utc);
 
     Ok(EndpointAggregation {
         endpoint,

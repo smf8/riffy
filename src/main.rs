@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Analysis pipeline: bounded channel → single consumer task
-    let (analysis_tx, analysis_rx) = pipeline::channel();
+    let (analysis_tx, analysis_rx) = pipeline::channel(cfg.pipeline.channel_capacity);
 
     let collector = Arc::new(LiveCounters::new());
     let patterns: Vec<String> = cfg.endpoints.iter().map(|e| e.pattern.clone()).collect();
