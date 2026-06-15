@@ -2,14 +2,16 @@ use crate::config::Riffy;
 use crate::endpoint::EndpointMatcher;
 use crate::pipeline::AnalysisMessage;
 use crate::proxy::upstream::UpstreamClient;
+use crate::storage::DiffStore;
 use crate::telemetry::metrics::{render_metrics, track_proxy};
+use axum::extract::FromRef;
 use axum::routing::{any, get};
 use axum::{middleware, Router};
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use super::proxy;
+use super::{proxy, query};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -27,13 +29,37 @@ pub fn create_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Admin router: health check + Prometheus metrics. `/metrics` renders an
-/// empty body when metrics are disabled (no handle installed).
-pub fn admin_router(metrics_handle: Option<PrometheusHandle>) -> Router {
+/// Shared state for the admin server: the optional Prometheus handle and the
+/// diff store backing the read API. `FromRef` lets each handler extract only
+/// the substate it needs.
+#[derive(Clone)]
+pub struct AdminState {
+    pub metrics: Option<PrometheusHandle>,
+    pub store: Arc<dyn DiffStore>,
+}
+
+impl FromRef<AdminState> for Option<PrometheusHandle> {
+    fn from_ref(state: &AdminState) -> Self {
+        state.metrics.clone()
+    }
+}
+
+impl FromRef<AdminState> for Arc<dyn DiffStore> {
+    fn from_ref(state: &AdminState) -> Self {
+        state.store.clone()
+    }
+}
+
+/// Admin router: health check, Prometheus metrics, and the diff query API.
+/// `/metrics` renders an empty body when metrics are disabled (no handle
+/// installed).
+pub fn admin_router(state: AdminState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/metrics", get(render_metrics))
-        .with_state(metrics_handle)
+        .route("/diffs/paths", get(query::list_paths))
+        .route("/diffs/detail", get(query::diff_detail))
+        .with_state(state)
 }
 
 async fn healthz() -> axum::http::StatusCode {

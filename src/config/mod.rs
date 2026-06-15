@@ -16,7 +16,10 @@ pub struct Riffy {
     pub upstream: Upstream,
     pub threshold: Threshold,
     pub endpoints: Vec<EndpointPattern>,
-    pub redis: RedisConfig,
+    /// Redis is opt-in: when this section is absent the diff store falls back
+    /// to an in-memory implementation (no persistence across restarts).
+    #[serde(default)]
+    pub redis: Option<RedisConfig>,
     pub server: Server,
     pub logging: Logging,
     pub metrics: Metrics,
@@ -188,10 +191,9 @@ impl Riffy {
             self.proxy.port != self.server.port,
             "proxy.port and server.port must differ"
         );
-        ensure!(
-            !self.redis.uri.trim().is_empty(),
-            "redis.uri must not be empty"
-        );
+        if let Some(redis) = &self.redis {
+            ensure!(!redis.uri.trim().is_empty(), "redis.uri must not be empty");
+        }
 
         Ok(())
     }

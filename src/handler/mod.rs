@@ -3,4 +3,5 @@
 //! Actual upstream proxying lives in `crate::proxy`.
 
 pub mod proxy;
+pub mod query;
 pub mod router;

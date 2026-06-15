@@ -1,3 +1,4 @@
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
@@ -8,26 +9,31 @@ use serde_json::json;
 pub enum AppError {
     #[error("{0}")]
     Proxy(#[source] crate::proxy::error::ProxyError),
-    // #[error("{0}")]
-    // Config(#[source] crate::config::error::ConfigError),
-    //
-    // #[error("{0}")]
-    // Redis(#[source] crate::redis::error::RedisError),
-    //
-    // #[error("{0}")]
-    // Compare(#[source] crate::compare::error::CompareError),
-    //
-    // #[error("{0}")]
-    // Analysis(#[source] crate::analysis::error::AnalysisError),
+
+    #[error("storage error: {0}")]
+    Storage(#[from] crate::storage::error::StoreError),
+
+    #[error("{0}")]
+    NotFound(String),
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            AppError::Proxy(e) => (e.status_code(), e.to_string()),
+            AppError::Proxy(e) => {
+                tracing::error!(error = %e, "proxy request error");
+                (e.status_code(), e.to_string())
+            }
+            AppError::Storage(e) => {
+                // Don't leak backend details (e.g. Redis URIs) to clients.
+                tracing::error!(error = %e, "storage error serving query");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal storage error".to_owned(),
+                )
+            }
+            AppError::NotFound(message) => (StatusCode::NOT_FOUND, message.clone()),
         };
-
-        tracing::error!(error = %self, "request error");
 
         (status, Json(json!({ "error": message }))).into_response()
     }

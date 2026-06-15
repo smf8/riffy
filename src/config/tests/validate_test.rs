@@ -22,12 +22,12 @@ fn valid_config() -> Riffy {
         endpoints: vec![EndpointPattern {
             pattern: "/api/v1/users/:id".to_owned(),
         }],
-        redis: RedisConfig {
+        redis: Some(RedisConfig {
             uri: "redis://localhost:6379".to_owned(),
             stream_key: "riffy:diffs".to_owned(),
             aggregation_interval: Duration::from_secs(10),
             aggregation_key_prefix: "riffy:agg".to_owned(),
-        },
+        }),
         server: Server {
             address: "0.0.0.0".to_owned(),
             port: 8888,
@@ -92,6 +92,13 @@ fn conflicting_ports_fail() {
 #[test]
 fn empty_redis_uri_fails() {
     let mut cfg = valid_config();
-    cfg.redis.uri = String::new();
+    cfg.redis.as_mut().unwrap().uri = String::new();
     assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn absent_redis_section_is_valid() {
+    let mut cfg = valid_config();
+    cfg.redis = None;
+    assert!(cfg.validate().is_ok());
 }

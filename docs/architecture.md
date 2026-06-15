@@ -61,7 +61,7 @@ flowchart TD
         decide -- "yes" --> entry
         decide -- "no" --> skip
 
-        ticker["interval ticker<br/>redis.aggregation-interval (10s default)<br/>+ one final flush on shutdown (R19)"]
+        ticker["interval ticker<br/>redis.aggregation-interval, or 10s<br/>when redis is unset (R29)<br/>+ one final flush on shutdown (R19)"]
         snapshot["collector.snapshot →<br/>JoinedEndpoint / JoinedField<br/>(src/analysis/joined.rs)"]
         classify["DifferencesFilter.is_regression:<br/>raw > noise<br/>AND relative diff > threshold.relative (20%)<br/>AND absolute diff > threshold.absolute (0.03%)<br/>(src/analysis/filter.rs)"]
         ticker --> snapshot --> classify
@@ -70,7 +70,7 @@ flowchart TD
     entry --> xadd
     classify --> hset
 
-    subgraph store ["DiffStore trait (src/storage/mod.rs, R25) — RedisDiffStore (redis.rs) / InMemoryDiffStore for tests (memory.rs)"]
+    subgraph store ["DiffStore trait (src/storage/mod.rs, R25) — RedisDiffStore (redis.rs) / InMemoryDiffStore, the default when redis config is absent (memory.rs, R29)"]
         xadd[("XADD riffy:diffs<br/>per-request diff entry")]
         hset[("HSET riffy:agg:{endpoint}<br/>pipelined snapshot, one RTT (R15)")]
     end
@@ -80,17 +80,40 @@ Solid arrows are data flow within one request's lifecycle; the dotted arrow is
 the only hand-off from the client-blocking path to async work. The graph is
 acyclic: the ticker is an independent root, not a back-edge.
 
-## Observability sidecar
+## Admin server (observability + query API)
+
+The admin server carries `AdminState { metrics, store }` (R29); `FromRef`
+hands each route only the substate it needs. The query API reads the same
+`DiffStore` the consumer writes to, so it reflects the periodic aggregation
+snapshots (staleness ≤ the aggregation interval) and the per-request stream.
 
 ```mermaid
 flowchart LR
     operator(["Operator / Prometheus"]) --> admin
 
-    subgraph admin ["Admin server — axum on server.port, admin_router (src/handler/router.rs, R24)"]
-        hz["GET /healthz → 204<br/>(src/handler/router.rs)"]
+    subgraph admin ["Admin server — axum on server.port, admin_router (src/handler/router.rs, R24/R29)"]
+        hz["GET /healthz → 204"]
         mx["GET /metrics → PrometheusHandle.render<br/>empty body when metrics.enabled=false<br/>(src/telemetry/metrics.rs)"]
+        paths["GET /diffs/paths[?endpoint=]<br/>endpoints → diffing field paths<br/>(src/handler/query.rs)"]
+        detail["GET /diffs/detail?endpoint=&path=<br/>field stats + paginated samples<br/>(src/handler/query.rs)"]
     end
+
+    paths -. "get/list_aggregations" .-> readstore
+    detail -. "get_aggregation + recent_samples" .-> readstore
+    readstore[("DiffStore read side (R29)<br/>HGETALL / SCAN / XREVRANGE")]
 ```
+
+Read methods on `DiffStore` (analysis-side only, never the hot path):
+`get_aggregation` (HGETALL one `riffy:agg:{endpoint}` hash),
+`list_aggregations` (cursor SCAN `riffy:agg:*` + pipelined HGETALL),
+`recent_samples` (paged, newest-first XREVRANGE over `riffy:diffs`, filtered to
+one endpoint + field path, `offset`/`limit` paginated).
+
+| Query route | Response |
+|-------------|----------|
+| `GET /diffs/paths` | `{ "endpoints": [ { endpoint, total, paths[], last_updated } ] }`, sorted by endpoint |
+| `GET /diffs/paths?endpoint=<ep>` | one `{ endpoint, total, paths[], last_updated }`; 404 if unknown |
+| `GET /diffs/detail?endpoint=&path=` | `{ endpoint, path, total, raw_count, noise_count, is_regression, relative_difference, absolute_difference, last_updated, samples }`; `samples = { items[], limit, offset, has_more }`, newest-first; 404 if nothing recorded for that endpoint+path. `limit` default 20 / max 100 |
 
 | Metric | Labels | Emitted from |
 |--------|--------|--------------|

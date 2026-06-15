@@ -1,0 +1,154 @@
+//! Read-side query API (admin server): inspect recorded diffs.
+//! `GET /diffs/paths` lists endpoints and their diffing field paths;
+//! `GET /diffs/detail` returns one field's aggregated stats plus a paginated,
+//! newest-first list of the actual diff samples.
+
+use std::sync::Arc;
+
+use axum::extract::{Query, State};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::analysis::joined::JoinedField;
+use crate::error::AppError;
+use crate::storage::{DiffStore, EndpointAggregation, SamplePage};
+
+const DEFAULT_SAMPLE_LIMIT: usize = 20;
+const MAX_SAMPLE_LIMIT: usize = 100;
+/// Cap on `offset` so a pathological value can't trigger an unbounded scan.
+const MAX_SAMPLE_OFFSET: usize = 100_000;
+
+#[derive(Debug, Deserialize)]
+pub struct PathsQuery {
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EndpointPaths {
+    pub endpoint: String,
+    pub total: u64,
+    pub paths: Vec<String>,
+    pub last_updated: DateTime<Utc>,
+}
+
+impl From<EndpointAggregation> for EndpointPaths {
+    fn from(aggregation: EndpointAggregation) -> Self {
+        let mut paths: Vec<String> = aggregation.fields.into_keys().collect();
+        paths.sort();
+        Self {
+            endpoint: aggregation.endpoint,
+            total: aggregation.total,
+            paths,
+            last_updated: aggregation.last_updated,
+        }
+    }
+}
+
+/// `GET /diffs/paths` — list the field paths that have diffs, per endpoint.
+/// With `?endpoint=<ep>` it returns just that endpoint (404 if unknown).
+pub async fn list_paths(
+    State(store): State<Arc<dyn DiffStore>>,
+    Query(query): Query<PathsQuery>,
+) -> Result<Response, AppError> {
+    match query.endpoint {
+        Some(endpoint) => {
+            let aggregation = store.get_aggregation(&endpoint).await?.ok_or_else(|| {
+                AppError::NotFound(format!("no diffs recorded for endpoint '{endpoint}'"))
+            })?;
+            Ok(Json(EndpointPaths::from(aggregation)).into_response())
+        }
+        None => {
+            let mut aggregations = store.list_aggregations().await?;
+            aggregations.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
+            let endpoints: Vec<EndpointPaths> =
+                aggregations.into_iter().map(EndpointPaths::from).collect();
+            Ok(Json(json!({ "endpoints": endpoints })).into_response())
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DetailQuery {
+    pub endpoint: String,
+    pub path: String,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiffDetail {
+    pub endpoint: String,
+    pub path: String,
+    pub total: u64,
+    pub raw_count: u64,
+    pub noise_count: u64,
+    pub is_regression: bool,
+    pub relative_difference: f64,
+    pub absolute_difference: f64,
+    pub last_updated: Option<DateTime<Utc>>,
+    pub samples: SamplePage,
+}
+
+/// `GET /diffs/detail?endpoint=<ep>&path=<p>` — aggregated stats for one field
+/// plus a paginated, newest-first list of the actual diff samples at that path.
+pub async fn diff_detail(
+    State(store): State<Arc<dyn DiffStore>>,
+    Query(query): Query<DetailQuery>,
+) -> Result<Response, AppError> {
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_SAMPLE_LIMIT)
+        .clamp(1, MAX_SAMPLE_LIMIT);
+    let offset = query.offset.unwrap_or(0).min(MAX_SAMPLE_OFFSET);
+
+    let aggregation = store.get_aggregation(&query.endpoint).await?;
+    let field = aggregation
+        .as_ref()
+        .and_then(|aggregation| aggregation.fields.get(&query.path));
+
+    let total = aggregation.as_ref().map(|a| a.total).unwrap_or(0);
+    let last_updated = aggregation.as_ref().map(|a| a.last_updated);
+    let (raw_count, noise_count, is_regression) = match field {
+        Some(field) => (field.raw_count, field.noise_count, field.is_regression),
+        None => (0, 0, false),
+    };
+
+    let samples = store
+        .recent_samples(&query.endpoint, &query.path, limit, offset)
+        .await?;
+
+    // Nothing recorded for this endpoint+path: no aggregation field and no
+    // samples at the start of the stream.
+    if field.is_none() && samples.items.is_empty() && !samples.has_more && offset == 0 {
+        return Err(AppError::NotFound(format!(
+            "no diffs recorded for endpoint '{}' path '{}'",
+            query.endpoint, query.path
+        )));
+    }
+
+    // Reuse the analyzer's noise math so the reported percentages match the
+    // filter that classifies regressions.
+    let joined = JoinedField {
+        path: query.path.clone(),
+        raw_count,
+        noise_count,
+        endpoint_total: total,
+    };
+
+    Ok(Json(DiffDetail {
+        endpoint: query.endpoint,
+        path: query.path,
+        total,
+        raw_count,
+        noise_count,
+        is_regression,
+        relative_difference: joined.relative_difference(),
+        absolute_difference: joined.absolute_difference(),
+        last_updated,
+        samples,
+    })
+    .into_response())
+}

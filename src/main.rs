@@ -6,12 +6,16 @@ use anyhow::Context;
 use riffy::analysis::collector::InMemoryDifferenceCollector;
 use riffy::analysis::filter::DifferencesFilter;
 use riffy::endpoint::EndpointMatcher;
-use riffy::handler::router::{admin_router, create_router, AppState};
+use riffy::handler::router::{admin_router, create_router, AdminState, AppState};
 use riffy::pipeline::consumer::Consumer;
 use riffy::proxy::UpstreamClient;
-use riffy::storage::RedisDiffStore;
+use riffy::storage::{DiffStore, InMemoryDiffStore, RedisDiffStore};
 use riffy::{config, pipeline, telemetry};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Snapshot cadence for the in-memory store when Redis is not configured.
+const DEFAULT_AGGREGATION_INTERVAL: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -37,23 +41,37 @@ async fn main() -> anyhow::Result<()> {
     let patterns: Vec<String> = cfg.endpoints.iter().map(|e| e.pattern.clone()).collect();
     let matcher = Arc::new(EndpointMatcher::new(&patterns));
     let filter = DifferencesFilter::from_config(&cfg.threshold);
-    let store = Arc::new(
-        RedisDiffStore::connect(
-            &cfg.redis.uri,
-            cfg.redis.stream_key.clone(),
-            cfg.redis.aggregation_key_prefix.clone(),
-        )
-        .await
-        .context("failed to connect to redis")?,
-    );
+
+    // Redis is opt-in: with no redis config we fall back to the in-memory
+    // store (no persistence). The store is shared between the consumer (writer)
+    // and the admin query API (reader).
+    let (store, aggregation_interval): (Arc<dyn DiffStore>, Duration) = match &cfg.redis {
+        Some(redis) => {
+            let store = RedisDiffStore::connect(
+                &redis.uri,
+                redis.stream_key.clone(),
+                redis.aggregation_key_prefix.clone(),
+            )
+            .await
+            .context("failed to connect to redis")?;
+            (Arc::new(store), redis.aggregation_interval)
+        }
+        None => {
+            tracing::info!("redis not configured; using in-memory diff store");
+            (
+                Arc::new(InMemoryDiffStore::new()),
+                DEFAULT_AGGREGATION_INTERVAL,
+            )
+        }
+    };
 
     let consumer_handle = Consumer::new(
         analysis_rx,
         matcher.clone(),
         collector,
         filter,
-        store,
-        cfg.redis.aggregation_interval,
+        store.clone(),
+        aggregation_interval,
     )
     .spawn();
 
@@ -84,8 +102,11 @@ async fn main() -> anyhow::Result<()> {
     let proxy_listener = tokio::net::TcpListener::bind(&proxy_addr).await?;
     tracing::info!(addr = %proxy_addr, "proxy server listening");
 
-    // Admin server (healthz + metrics)
-    let admin_app = admin_router(metrics_handle);
+    // Admin server (healthz + metrics + diff query API)
+    let admin_app = admin_router(AdminState {
+        metrics: metrics_handle,
+        store,
+    });
     let admin_addr = format!("{}:{}", cfg.server.address, cfg.server.port);
     let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;
     tracing::info!(addr = %admin_addr, "admin server listening");

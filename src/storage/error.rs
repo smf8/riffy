@@ -7,4 +7,10 @@ pub enum StoreError {
 
     #[error("serialization failed: {0}")]
     Serialize(#[source] serde_json::Error),
+
+    #[error("deserialization failed: {0}")]
+    Deserialize(#[source] serde_json::Error),
+
+    #[error("corrupt stored data: {0}")]
+    Corrupt(String),
 }

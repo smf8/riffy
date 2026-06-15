@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use super::Difference;
 use crate::compare::diff::diff;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Classification of a difference at a given path.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffType {
     Primitive,
@@ -18,11 +18,13 @@ pub enum DiffType {
 }
 
 /// A flattened representation of a single difference at a dot-separated path.
-#[derive(Debug, Clone, Serialize)]
+/// `Deserialize` so the read API can reconstruct it from JSON persisted in the
+/// store (Redis stream fields / in-memory entries).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlatDiff {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub left: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub right: Option<Value>,
     pub diff_type: DiffType,
 }

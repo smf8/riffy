@@ -11,9 +11,7 @@ use axum::routing::any;
 use axum::{Json, Router};
 use riffy::analysis::collector::InMemoryDifferenceCollector;
 use riffy::analysis::filter::DifferencesFilter;
-use riffy::config::{
-    EndpointPattern, Logging, Metrics, Proxy, RedisConfig, Riffy, Server, Threshold, Upstream,
-};
+use riffy::config::{EndpointPattern, Logging, Metrics, Proxy, Riffy, Server, Threshold, Upstream};
 use riffy::endpoint::EndpointMatcher;
 use riffy::handler::router::{create_router, AppState};
 use riffy::pipeline::consumer::Consumer;
@@ -54,12 +52,9 @@ fn test_config() -> Riffy {
         endpoints: vec![EndpointPattern {
             pattern: "/api/v1/users/:id".to_owned(),
         }],
-        redis: RedisConfig {
-            uri: "unused".to_owned(),
-            stream_key: "riffy:diffs".to_owned(),
-            aggregation_interval: Duration::from_secs(3600),
-            aggregation_key_prefix: "riffy:agg".to_owned(),
-        },
+        // The proxy integration test drives the in-memory store directly, so
+        // the config needs no redis section.
+        redis: None,
         server: Server {
             address: "127.0.0.1".to_owned(),
             port: 1,

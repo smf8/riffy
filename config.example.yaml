@@ -21,6 +21,8 @@ threshold:
   relative: 20.0
   absolute: 0.03
 
+# Redis is optional. Omit this whole section to use the in-memory diff store
+# (no persistence across restarts) — useful for local development and tests.
 redis:
   uri: "redis://localhost:6379"
   stream-key: "riffy:diffs"
