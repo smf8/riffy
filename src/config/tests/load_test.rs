@@ -49,6 +49,7 @@ fn deserializes_minimal_config_with_defaults() {
     // Omitted optional sections fall back to their defaults.
     assert!(cfg.redis.is_none());
     assert_eq!(cfg.pipeline.channel_capacity, 1024);
+    assert_eq!(cfg.pipeline.stream_cap, 10_000);
     assert_eq!(cfg.upstream.protocol, "http");
     assert_eq!(cfg.upstream.timeout, Duration::from_secs(30));
     assert!(!cfg.proxy.allow_http_side_effects);

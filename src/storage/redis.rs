@@ -5,7 +5,7 @@ use super::{DiffEntry, DiffSample, DiffStore, EndpointAggregation, FieldAggregat
 use crate::compare::flatten::FieldDiff;
 use chrono::{DateTime, Utc};
 use redis::aio::ConnectionManager;
-use redis::streams::{StreamId, StreamRangeReply};
+use redis::streams::{StreamId, StreamMaxlen, StreamRangeReply};
 use redis::{from_redis_value, AsyncCommands, Value};
 
 /// Redis-backed `DiffStore`: per-request diffs go to a stream (`XADD`),
@@ -14,6 +14,8 @@ pub struct RedisDiffStore {
     conn: ConnectionManager,
     stream_key: String,
     aggregation_key_prefix: String,
+    /// Approximate cap on the diff stream length (`XADD MAXLEN ~`).
+    stream_cap: usize,
 }
 
 impl RedisDiffStore {
@@ -22,6 +24,7 @@ impl RedisDiffStore {
         uri: &str,
         stream_key: String,
         aggregation_key_prefix: String,
+        stream_cap: usize,
     ) -> Result<Self, StoreError> {
         let client = redis::Client::open(uri).map_err(StoreError::Redis)?;
         let conn = ConnectionManager::new(client)
@@ -32,6 +35,7 @@ impl RedisDiffStore {
             conn,
             stream_key,
             aggregation_key_prefix,
+            stream_cap,
         })
     }
 }
@@ -58,9 +62,16 @@ impl DiffStore for RedisDiffStore {
         }
 
         // ConnectionManager is a cheap clonable handle to one multiplexed connection.
+        // Approximate trimming (`~`) lets Redis trim in whole macro-nodes, far
+        // cheaper than exact trimming on every append.
         let mut conn = self.conn.clone();
         let _id: String = conn
-            .xadd(&self.stream_key, "*", &fields)
+            .xadd_maxlen(
+                &self.stream_key,
+                StreamMaxlen::Approx(self.stream_cap),
+                "*",
+                &fields,
+            )
             .await
             .map_err(StoreError::Redis)?;
 

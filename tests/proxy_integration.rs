@@ -41,6 +41,7 @@ fn test_config() -> Riffy {
         },
         pipeline: Pipeline {
             channel_capacity: 1024,
+            stream_cap: 10_000,
         },
         upstream: Upstream {
             baseline: String::new(),

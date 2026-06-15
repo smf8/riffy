@@ -52,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
                 &redis.uri,
                 redis.stream_key.clone(),
                 redis.aggregation_key_prefix.clone(),
+                cfg.pipeline.stream_cap,
             )
             .await
             .context("failed to connect to redis")?;
@@ -60,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
         None => {
             tracing::info!("redis not configured; using in-memory diff store");
             (
-                Arc::new(InMemoryDiffStore::new()),
+                Arc::new(InMemoryDiffStore::with_capacity(cfg.pipeline.stream_cap)),
                 DEFAULT_AGGREGATION_INTERVAL,
             )
         }

@@ -11,6 +11,9 @@ pipeline:
   # consumer falls behind, the newest message is dropped with a warning
   # (backpressure by shedding, never unbounded queueing).
   channel-capacity: 1024
+  # Max per-request diff samples kept in the diff stream; oldest are trimmed
+  # past this (Redis XADD MAXLEN ~, in-memory drops the front).
+  stream-cap: 10000
 
 upstream:
   baseline: "localhost:9100"

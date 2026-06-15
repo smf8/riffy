@@ -40,16 +40,26 @@ pub struct Pipeline {
     /// (backpressure by shedding, never unbounded queueing).
     #[serde(default = "default_channel_capacity")]
     pub channel_capacity: usize,
+    /// Maximum number of per-request diff samples retained in the diff stream.
+    /// The oldest samples are trimmed once the cap is exceeded — Redis via
+    /// `XADD MAXLEN ~`, the in-memory store by dropping the front.
+    #[serde(default = "default_stream_cap")]
+    pub stream_cap: usize,
 }
 
 fn default_channel_capacity() -> usize {
     1024
 }
 
+fn default_stream_cap() -> usize {
+    10_000
+}
+
 impl Default for Pipeline {
     fn default() -> Self {
         Self {
             channel_capacity: default_channel_capacity(),
+            stream_cap: default_stream_cap(),
         }
     }
 }
@@ -217,6 +227,10 @@ impl Riffy {
         ensure!(
             self.pipeline.channel_capacity > 0,
             "pipeline.channel-capacity must be > 0"
+        );
+        ensure!(
+            self.pipeline.stream_cap > 0,
+            "pipeline.stream-cap must be > 0"
         );
         if let Some(redis) = &self.redis {
             ensure!(!redis.uri.trim().is_empty(), "redis.uri must not be empty");

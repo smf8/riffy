@@ -147,3 +147,27 @@ async fn recent_samples_paginate_newest_first() {
     assert!(empty.items.is_empty());
     assert!(!empty.has_more);
 }
+
+#[tokio::test]
+async fn append_diff_trims_oldest_past_cap() {
+    let store = InMemoryDiffStore::with_capacity(2);
+
+    for i in 0..3 {
+        store
+            .append_diff(&entry("/e", Some("x"), &format!("l{i}"), &format!("r{i}")))
+            .await
+            .unwrap();
+    }
+
+    // Only the two newest survive; the oldest (l0) was trimmed from the front.
+    let entries = store.entries().await;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(
+        entries[0].raw_fields.get("x").unwrap().left,
+        Some(json!("l1"))
+    );
+    assert_eq!(
+        entries[1].raw_fields.get("x").unwrap().left,
+        Some(json!("l2"))
+    );
+}

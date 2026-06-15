@@ -1,23 +1,40 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use super::error::StoreError;
 use super::{DiffEntry, DiffSample, DiffStore, EndpointAggregation, SamplePage};
 use tokio::sync::Mutex;
 
 /// In-memory `DiffStore` for tests and local development without Redis.
-#[derive(Default)]
 pub struct InMemoryDiffStore {
-    entries: Mutex<Vec<DiffEntry>>,
+    entries: Mutex<VecDeque<DiffEntry>>,
     aggregations: Mutex<HashMap<String, EndpointAggregation>>,
+    /// Max retained samples; the front (oldest) is dropped past this.
+    cap: usize,
+}
+
+impl Default for InMemoryDiffStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InMemoryDiffStore {
+    /// Unbounded sample retention — the default used by tests and local dev.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_capacity(usize::MAX)
+    }
+
+    /// Bounded sample retention: at most `cap` per-request samples are kept.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            entries: Mutex::new(VecDeque::new()),
+            aggregations: Mutex::new(HashMap::new()),
+            cap,
+        }
     }
 
     pub async fn entries(&self) -> Vec<DiffEntry> {
-        self.entries.lock().await.clone()
+        self.entries.lock().await.iter().cloned().collect()
     }
 
     pub async fn aggregation(&self, endpoint: &str) -> Option<EndpointAggregation> {
@@ -28,7 +45,11 @@ impl InMemoryDiffStore {
 #[async_trait::async_trait]
 impl DiffStore for InMemoryDiffStore {
     async fn append_diff(&self, entry: &DiffEntry) -> Result<(), StoreError> {
-        self.entries.lock().await.push(entry.clone());
+        let mut entries = self.entries.lock().await;
+        entries.push_back(entry.clone());
+        while entries.len() > self.cap {
+            entries.pop_front();
+        }
         Ok(())
     }
 

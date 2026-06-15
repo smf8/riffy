@@ -10,6 +10,7 @@ fn valid_config() -> Riffy {
         },
         pipeline: Pipeline {
             channel_capacity: 1024,
+            stream_cap: 10_000,
         },
         upstream: Upstream {
             baseline: "localhost:9100".to_owned(),
@@ -110,5 +111,12 @@ fn absent_redis_section_is_valid() {
 fn zero_channel_capacity_fails() {
     let mut cfg = valid_config();
     cfg.pipeline.channel_capacity = 0;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn zero_stream_cap_fails() {
+    let mut cfg = valid_config();
+    cfg.pipeline.stream_cap = 0;
     assert!(cfg.validate().is_err());
 }
