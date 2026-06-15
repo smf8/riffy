@@ -28,16 +28,22 @@
     .paths li:hover { background:var(--panel); }
     button { font:inherit; color:var(--fg); background:var(--panel); border:1px solid var(--line);
              border-radius:6px; padding:.2rem .55rem; cursor:pointer; }
-    button:hover { border-color:var(--accent); }
+    button:hover:not(:disabled) { border-color:var(--accent); }
+    button:disabled { opacity:.4; cursor:default; }
     button.reset { color:var(--bad); border-color:transparent; padding:.15rem .45rem; }
     .toolbar { margin-bottom:.7rem; }
     table { border-collapse:collapse; width:100%; }
-    th, td { text-align:left; padding:.3rem .5rem; border-bottom:1px solid var(--line); vertical-align:top; }
+    th, td { text-align:left; padding:.35rem .5rem; border-bottom:1px solid var(--line); vertical-align:top; }
     table.stats th { color:var(--muted); width:9rem; font-weight:500; }
     td { font-variant-numeric:tabular-nums; word-break:break-word; }
+    td.ts { white-space:nowrap; color:var(--muted); }
     .badge { font-size:.72rem; padding:.1rem .45rem; border-radius:999px; margin-left:.5rem; }
     .badge.bad { background:#3a1620; color:var(--bad); }
     .badge.ok  { background:#11321f; color:var(--ok); }
+    .dtype { display:inline-block; font-size:.68rem; padding:.05rem .4rem; border-radius:999px;
+             background:var(--line); color:var(--muted); margin-right:.5rem; text-transform:uppercase;
+             letter-spacing:.03em; white-space:nowrap; }
+    .pager { display:flex; align-items:center; gap:.8rem; margin-top:.7rem; }
     .muted { color:var(--muted); }
   </style>
 </head>
@@ -69,7 +75,7 @@
         <h2 x-text="selected && selected.endpoint"></h2>
         <ul>
           <template x-for="p in (selected ? selected.paths : [])" :key="p">
-            <li @click="showDetail(p)" x-text="p"></li>
+            <li :class="{ active: p === path }" @click="showDetail(p)" x-text="p"></li>
           </template>
         </ul>
         <p class="muted" x-show="selected && selected.paths.length === 0">No diffing fields.</p>
@@ -92,20 +98,38 @@
               <tr><th>last updated</th><td x-text="detail.last_updated || '—'"></td></tr>
             </table>
 
-            <h3>Samples <span class="muted" x-text="'(' + detail.samples.items.length + ')'"></span></h3>
+            <h3>Samples</h3>
             <table class="samples">
               <thead><tr><th>timestamp</th><th>raw (baseline → candidate)</th><th>noise (baseline → control)</th></tr></thead>
               <tbody>
                 <template x-for="(s, i) in detail.samples.items" :key="i">
                   <tr>
-                    <td x-text="s.timestamp"></td>
-                    <td x-text="s.raw ? (fmt(s.raw.left) + ' → ' + fmt(s.raw.right)) : '—'"></td>
-                    <td x-text="s.noise ? (fmt(s.noise.left) + ' → ' + fmt(s.noise.right)) : '—'"></td>
+                    <td class="ts" x-text="s.timestamp"></td>
+                    <td>
+                      <template x-if="s.raw">
+                        <span><span class="dtype" x-text="dlabel(s.raw)"></span><span x-text="diffValue(s.raw)"></span></span>
+                      </template>
+                      <template x-if="!s.raw"><span class="muted">—</span></template>
+                    </td>
+                    <td>
+                      <template x-if="s.noise">
+                        <span><span class="dtype" x-text="dlabel(s.noise)"></span><span x-text="diffValue(s.noise)"></span></span>
+                      </template>
+                      <template x-if="!s.noise"><span class="muted">—</span></template>
+                    </td>
                   </tr>
                 </template>
               </tbody>
             </table>
-            <p class="muted" x-show="detail.samples.items.length === 0">No samples on this page.</p>
+            <p class="muted" x-show="detail.samples.items.length === 0 && detail.samples.offset === 0">
+              No samples recorded for this field.
+            </p>
+
+            <div class="pager" x-show="detail.samples.items.length > 0 || detail.samples.offset > 0">
+              <button @click="prevPage()" :disabled="detail.samples.offset === 0">‹ prev</button>
+              <span class="muted" x-text="pageLabel()"></span>
+              <button @click="nextPage()" :disabled="!detail.samples.has_more">next ›</button>
+            </div>
           </div>
         </template>
       </section>
@@ -117,7 +141,10 @@
       Alpine.data('diffs', () => ({
         endpoints: [],
         selected: null,
+        path: null,
         detail: null,
+        limit: 20,
+        offset: 0,
         error: '',
 
         async init() { await this.loadEndpoints(); },
@@ -128,26 +155,52 @@
             const r = await fetch('/diffs/paths');
             if (!r.ok) throw new Error('GET /diffs/paths → ' + r.status);
             this.endpoints = (await r.json()).endpoints || [];
-            // Keep the current selection in sync with the refreshed data.
+            // Keep the current selection/detail in sync with the refreshed data.
             if (this.selected) {
               this.selected = this.endpoints.find(e => e.endpoint === this.selected.endpoint) || null;
-              if (!this.selected) this.detail = null;
+              if (!this.selected) { this.path = null; this.detail = null; }
+              else if (this.path) { await this.loadDetail(); }
             }
           } catch (e) { this.error = String(e); }
         },
 
-        select(ep) { this.selected = ep; this.detail = null; },
+        select(ep) { this.selected = ep; this.path = null; this.detail = null; this.offset = 0; },
 
-        async showDetail(path) {
+        showDetail(path) { this.path = path; this.offset = 0; return this.loadDetail(); },
+
+        async loadDetail() {
+          if (!this.selected || !this.path) return;
           this.error = '';
           try {
             const u = new URL('/diffs/detail', location.origin);
             u.searchParams.set('endpoint', this.selected.endpoint);
-            u.searchParams.set('path', path);
+            u.searchParams.set('path', this.path);
+            u.searchParams.set('limit', this.limit);
+            u.searchParams.set('offset', this.offset);
             const r = await fetch(u);
             if (!r.ok) throw new Error('GET /diffs/detail → ' + r.status);
             this.detail = await r.json();
           } catch (e) { this.error = String(e); }
+        },
+
+        nextPage() {
+          if (this.detail && this.detail.samples.has_more) {
+            this.offset += this.limit;
+            return this.loadDetail();
+          }
+        },
+
+        prevPage() {
+          if (this.offset > 0) {
+            this.offset = Math.max(0, this.offset - this.limit);
+            return this.loadDetail();
+          }
+        },
+
+        pageLabel() {
+          const s = this.detail.samples;
+          if (s.items.length === 0) return s.offset > 0 ? 'no more samples' : 'none';
+          return 'samples ' + (s.offset + 1) + '–' + (s.offset + s.items.length);
         },
 
         async reset(endpoint) {
@@ -158,12 +211,32 @@
             u.searchParams.set('endpoint', endpoint);
             const r = await fetch(u, { method: 'DELETE' });
             if (!r.ok && r.status !== 404) throw new Error('DELETE /diffs → ' + r.status);
-            if (this.selected && this.selected.endpoint === endpoint) { this.selected = null; this.detail = null; }
+            if (this.selected && this.selected.endpoint === endpoint) {
+              this.selected = null; this.path = null; this.detail = null;
+            }
             await this.loadEndpoints();
           } catch (e) { this.error = String(e); }
         },
 
-        fmt(v) { return (v === undefined || v === null) ? '—' : (typeof v === 'object' ? JSON.stringify(v) : v); },
+        // A field's diff_type as a human label, e.g. "missing_field" → "missing field".
+        dlabel(d) { return (d.diff_type || '').replace(/_/g, ' '); },
+
+        // Render the value change by presence: both sides → "a → b"; only one
+        // side present (missing/extra field) → that value; neither (ordering)
+        // → empty, the badge carries the meaning. A present side that is JSON
+        // null renders as "null" (distinct from an absent side).
+        diffValue(d) {
+          const hasL = Object.prototype.hasOwnProperty.call(d, 'left');
+          const hasR = Object.prototype.hasOwnProperty.call(d, 'right');
+          if (hasL && hasR) return this.fmt(d.left) + ' → ' + this.fmt(d.right);
+          if (hasL) return this.fmt(d.left);
+          if (hasR) return this.fmt(d.right);
+          return '';
+        },
+
+        // JSON.stringify keeps types visible: strings quoted, null as "null",
+        // objects/arrays as compact JSON.
+        fmt(v) { return JSON.stringify(v); },
       }));
     });
   </script>
