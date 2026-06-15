@@ -202,6 +202,32 @@ async fn diff_detail_returns_stats_and_paginated_samples() {
 }
 
 #[tokio::test]
+async fn admin_serves_ui_assets() {
+    let store = Arc::new(InMemoryDiffStore::new());
+    let addr = spawn_admin(store).await;
+    let client = http_client();
+
+    // The dashboard page.
+    let resp = client.get(format!("http://{addr}/")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp.headers()["content-type"].to_str().unwrap().to_owned();
+    assert!(ct.starts_with("text/html"), "content-type was {ct}");
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Riffy"));
+    assert!(body.contains("/alpine.js"));
+
+    // The vendored Alpine runtime.
+    let resp = client
+        .get(format!("http://{addr}/alpine.js"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp.headers()["content-type"].to_str().unwrap().to_owned();
+    assert!(ct.contains("javascript"), "content-type was {ct}");
+}
+
+#[tokio::test]
 async fn reset_stats_clears_endpoint_and_404s_when_absent() {
     let store = Arc::new(InMemoryDiffStore::new());
 

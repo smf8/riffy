@@ -86,13 +86,16 @@ The admin server carries `AdminState { metrics, store, classifiers, counters }`
 (R29/R31/R33); `FromRef` hands each route only the substate it needs. The query
 API reads the same `DiffStore` the consumer writes to, so it reflects the
 periodic aggregation snapshots (staleness ≤ the aggregation interval) and the
-per-request stream.
+per-request stream. A minimal Alpine.js dashboard is served at `GET /` (HTML +
+vendored Alpine embedded via `include_str!`, no build step) and drives that same
+read API from a browser (R34).
 
 ```mermaid
 flowchart LR
     operator(["Operator / Prometheus"]) --> admin
 
     subgraph admin ["Admin server — axum on server.admin-port, admin_router (src/http/router.rs, R24/R29/R33)"]
+        ui["GET / + /alpine.js<br/>embedded Alpine.js dashboard, no build step;<br/>consumes the JSON query API (R34)<br/>(src/http/ui.rs, ui/index.html)"]
         hz["GET /healthz → 204"]
         mx["GET /metrics → PrometheusHandle.render<br/>empty body when metrics.enabled=false<br/>(src/telemetry/metrics.rs)"]
         paths["GET /diffs/paths[?endpoint=]<br/>endpoints → diffing field paths<br/>(src/http/query.rs)"]

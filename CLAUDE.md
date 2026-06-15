@@ -82,6 +82,14 @@ Every use of `.unwrap()` or `.expect()` in non-test code requires an explicit co
 
 ---
 
+## Front-end (Admin UI)
+
+The admin server serves a minimal dashboard at `GET /` on `server.admin-port`: a single embedded page (`src/http/ui/index.html`) built with **Alpine.js** (vendored at `src/http/ui/alpine.min.js`, served at `/alpine.js`), baked into the binary via `include_str!`. **No build step, no node/npm** — it consumes the JSON query API (`/diffs/paths`, `/diffs/detail`, `DELETE /diffs`) directly via `fetch`.
+
+> **Rule:** Evaluate **every** change for front-end impact and apply the required UI modifications automatically, in the same change — do not ask first. Whenever you alter the read API the dashboard depends on (the response shape/fields of `/diffs/*`, route paths/methods, or the data model behind them), update `src/http/ui/index.html` so the UI stays correct. Keep the UI build-free and embedded. See the `frontend-ui` skill in `.claude/skills/` for conventions.
+
+---
+
 ## Redis Conventions
 
 - **Key format:** `{app_name}:{resource}:{type}` — e.g., `riffy:diffs:stream`, `riffy:agg:hash`.

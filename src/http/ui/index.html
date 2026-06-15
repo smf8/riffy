@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Riffy — diff dashboard</title>
+  <script defer src="/alpine.js"></script>
+  <style>
+    :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#d7dce5; --muted:#8b94a7;
+            --accent:#5b9dff; --bad:#ff5b6e; --ok:#34d17b; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:14px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+    header { display:flex; align-items:baseline; gap:.6rem; padding:.8rem 1.1rem; border-bottom:1px solid var(--line); }
+    header h1 { margin:0; font-size:1.1rem; }
+    header span { color:var(--muted); }
+    .error { margin:.6rem 1.1rem; padding:.5rem .7rem; background:#3a1620; color:var(--bad); border-radius:6px; }
+    main { display:grid; grid-template-columns: 320px 220px 1fr; gap:1px; background:var(--line);
+           min-height: calc(100vh - 53px); }
+    section { background:var(--bg); padding:.9rem 1.1rem; overflow:auto; }
+    h2 { font-size:.95rem; margin:.1rem 0 .7rem; }
+    h3 { font-size:.85rem; color:var(--muted); margin:1.1rem 0 .4rem; text-transform:uppercase; letter-spacing:.04em; }
+    ul { list-style:none; margin:0; padding:0; }
+    .endpoints li { display:flex; align-items:center; gap:.5rem; padding:.35rem .4rem; border-radius:6px; }
+    .endpoints li.active, .endpoints li:hover { background:var(--panel); }
+    .endpoints .ep { flex:1; cursor:pointer; word-break:break-all; }
+    .endpoints .total { color:var(--muted); font-variant-numeric:tabular-nums; }
+    .paths li { padding:.3rem .4rem; border-radius:6px; cursor:pointer; word-break:break-all; }
+    .paths li:hover { background:var(--panel); }
+    button { font:inherit; color:var(--fg); background:var(--panel); border:1px solid var(--line);
+             border-radius:6px; padding:.2rem .55rem; cursor:pointer; }
+    button:hover { border-color:var(--accent); }
+    button.reset { color:var(--bad); border-color:transparent; padding:.15rem .45rem; }
+    .toolbar { margin-bottom:.7rem; }
+    table { border-collapse:collapse; width:100%; }
+    th, td { text-align:left; padding:.3rem .5rem; border-bottom:1px solid var(--line); vertical-align:top; }
+    table.stats th { color:var(--muted); width:9rem; font-weight:500; }
+    td { font-variant-numeric:tabular-nums; word-break:break-word; }
+    .badge { font-size:.72rem; padding:.1rem .45rem; border-radius:999px; margin-left:.5rem; }
+    .badge.bad { background:#3a1620; color:var(--bad); }
+    .badge.ok  { background:#11321f; color:var(--ok); }
+    .muted { color:var(--muted); }
+  </style>
+</head>
+<body>
+  <div x-data="diffs">
+    <header>
+      <h1>Riffy</h1><span>diff dashboard</span>
+    </header>
+    <p class="error" x-show="error" x-text="error" x-cloak></p>
+    <main>
+      <section class="endpoints">
+        <div class="toolbar">
+          <button @click="loadEndpoints()">↻ refresh</button>
+        </div>
+        <h2>Endpoints</h2>
+        <ul>
+          <template x-for="ep in endpoints" :key="ep.endpoint">
+            <li :class="{ active: selected && selected.endpoint === ep.endpoint }">
+              <span class="ep" @click="select(ep)" x-text="ep.endpoint"></span>
+              <span class="total" x-text="ep.total"></span>
+              <button class="reset" title="clear statistics" @click="reset(ep.endpoint)">✕</button>
+            </li>
+          </template>
+        </ul>
+        <p class="muted" x-show="endpoints.length === 0">No diffs recorded yet.</p>
+      </section>
+
+      <section class="paths" x-show="selected" x-cloak>
+        <h2 x-text="selected && selected.endpoint"></h2>
+        <ul>
+          <template x-for="p in (selected ? selected.paths : [])" :key="p">
+            <li @click="showDetail(p)" x-text="p"></li>
+          </template>
+        </ul>
+        <p class="muted" x-show="selected && selected.paths.length === 0">No diffing fields.</p>
+      </section>
+
+      <section class="detail" x-show="detail" x-cloak>
+        <template x-if="detail">
+          <div>
+            <h2>
+              <span x-text="detail.path"></span>
+              <span class="badge" :class="detail.is_regression ? 'bad' : 'ok'"
+                    x-text="detail.is_regression ? 'REGRESSION' : 'ok'"></span>
+            </h2>
+            <table class="stats">
+              <tr><th>total requests</th><td x-text="detail.total"></td></tr>
+              <tr><th>raw count</th><td x-text="detail.raw_count"></td></tr>
+              <tr><th>noise count</th><td x-text="detail.noise_count"></td></tr>
+              <tr><th>relative diff</th><td x-text="detail.relative_difference.toFixed(2) + ' %'"></td></tr>
+              <tr><th>absolute diff</th><td x-text="detail.absolute_difference.toFixed(2) + ' %'"></td></tr>
+              <tr><th>last updated</th><td x-text="detail.last_updated || '—'"></td></tr>
+            </table>
+
+            <h3>Samples <span class="muted" x-text="'(' + detail.samples.items.length + ')'"></span></h3>
+            <table class="samples">
+              <thead><tr><th>timestamp</th><th>raw (baseline → candidate)</th><th>noise (baseline → control)</th></tr></thead>
+              <tbody>
+                <template x-for="(s, i) in detail.samples.items" :key="i">
+                  <tr>
+                    <td x-text="s.timestamp"></td>
+                    <td x-text="s.raw ? (fmt(s.raw.left) + ' → ' + fmt(s.raw.right)) : '—'"></td>
+                    <td x-text="s.noise ? (fmt(s.noise.left) + ' → ' + fmt(s.noise.right)) : '—'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+            <p class="muted" x-show="detail.samples.items.length === 0">No samples on this page.</p>
+          </div>
+        </template>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    document.addEventListener('alpine:init', () => {
+      Alpine.data('diffs', () => ({
+        endpoints: [],
+        selected: null,
+        detail: null,
+        error: '',
+
+        async init() { await this.loadEndpoints(); },
+
+        async loadEndpoints() {
+          this.error = '';
+          try {
+            const r = await fetch('/diffs/paths');
+            if (!r.ok) throw new Error('GET /diffs/paths → ' + r.status);
+            this.endpoints = (await r.json()).endpoints || [];
+            // Keep the current selection in sync with the refreshed data.
+            if (this.selected) {
+              this.selected = this.endpoints.find(e => e.endpoint === this.selected.endpoint) || null;
+              if (!this.selected) this.detail = null;
+            }
+          } catch (e) { this.error = String(e); }
+        },
+
+        select(ep) { this.selected = ep; this.detail = null; },
+
+        async showDetail(path) {
+          this.error = '';
+          try {
+            const u = new URL('/diffs/detail', location.origin);
+            u.searchParams.set('endpoint', this.selected.endpoint);
+            u.searchParams.set('path', path);
+            const r = await fetch(u);
+            if (!r.ok) throw new Error('GET /diffs/detail → ' + r.status);
+            this.detail = await r.json();
+          } catch (e) { this.error = String(e); }
+        },
+
+        async reset(endpoint) {
+          if (!confirm('Clear all statistics for ' + endpoint + '?')) return;
+          this.error = '';
+          try {
+            const u = new URL('/diffs', location.origin);
+            u.searchParams.set('endpoint', endpoint);
+            const r = await fetch(u, { method: 'DELETE' });
+            if (!r.ok && r.status !== 404) throw new Error('DELETE /diffs → ' + r.status);
+            if (this.selected && this.selected.endpoint === endpoint) { this.selected = null; this.detail = null; }
+            await this.loadEndpoints();
+          } catch (e) { this.error = String(e); }
+        },
+
+        fmt(v) { return (v === undefined || v === null) ? '—' : (typeof v === 'object' ? JSON.stringify(v) : v); },
+      }));
+    });
+  </script>
+  <style>[x-cloak] { display: none !important; }</style>
+</body>
+</html>

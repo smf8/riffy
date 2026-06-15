@@ -1,4 +1,4 @@
-use super::{forward, query};
+use super::{forward, query, ui};
 use crate::analysis::classify::EndpointClassifiers;
 use crate::analysis::counters::LiveCounters;
 use crate::config::Riffy;
@@ -71,6 +71,8 @@ impl FromRef<AdminState> for Arc<LiveCounters> {
 /// installed).
 pub fn admin_router(state: AdminState) -> Router {
     Router::new()
+        .route("/", get(ui::index))
+        .route("/alpine.js", get(ui::alpine_js))
         .route("/healthz", get(healthz))
         .route("/metrics", get(render_metrics))
         .route("/diffs/paths", get(query::list_paths))
