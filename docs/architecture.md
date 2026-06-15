@@ -20,7 +20,7 @@ in `.claude/skills/`.
 flowchart TD
     client(["Client"]) --> mw
 
-    subgraph proxyserver ["Proxy server — axum on proxy.port (src/http/router.rs, R24)"]
+    subgraph proxyserver ["Proxy server — axum on server.proxy-port (src/http/router.rs, R24/R33)"]
         mw["track_proxy middleware<br/>resolve endpoint template once;<br/>drop-guard records count + duration<br/>exactly once — real status, or<br/>status=cancelled if dropped (R21)<br/>(src/telemetry/metrics.rs)"]
         guard{"mutating method and<br/>allow-http-side-effects=false?<br/>(src/http/forward.rs)"}
         mw --> guard
@@ -29,7 +29,7 @@ flowchart TD
     guard -- "yes" --> blocked(["405 Method Not Allowed<br/>(no upstream is contacted)"])
 
     subgraph hotpath ["HOT PATH — client-blocking; must never carry analysis work (R2)"]
-        baseline["UpstreamClient.send → BASELINE<br/>reqwest, .no_proxy() (R18),<br/>hop-by-hop headers stripped<br/>(src/upstream/client.rs)"]
+        baseline["UpstreamClient.send → BASELINE<br/>reqwest, .no_proxy() (R18), scheme derived<br/>from address (R33), hop-by-hop headers stripped<br/>(src/upstream/client.rs)"]
         resp(["Client response<br/>= baseline response, always (Q13/R3)"])
         guard -- "no" --> baseline --> resp
     end
@@ -70,8 +70,8 @@ flowchart TD
     entry --> xadd
     snapshot --> hset
 
-    subgraph store ["DiffStore trait (src/storage/mod.rs, R25) — RedisDiffStore (redis.rs) / InMemoryDiffStore, the default when redis config is absent (memory.rs, R29)"]
-        xadd[("XADD riffy:diffs<br/>per-request diff entry")]
+    subgraph store ["DiffStore trait (src/storage/mod.rs, R25) — RedisDiffStore (redis.rs) / InMemoryDiffStore, selected by storage.backend (default in-memory) (memory.rs, R29/R33)"]
+        xadd[("XADD MAXLEN ~ riffy:diffs<br/>per-request diff entry;<br/>capped at storage.stream-cap (R33)")]
         hset[("HINCRBY riffy:agg:{endpoint}<br/>add deltas: total + raw:{path}/noise:{path};<br/>atomic pipeline, sums across instances, one RTT (R32)")]
     end
 ```
@@ -82,42 +82,49 @@ acyclic: the ticker is an independent root, not a back-edge.
 
 ## Admin server (observability + query API)
 
-The admin server carries `AdminState { metrics, store, classifier }` (R29/R31);
-`FromRef` hands each route only the substate it needs. The query API reads the same
-`DiffStore` the consumer writes to, so it reflects the periodic aggregation
-snapshots (staleness ≤ the aggregation interval) and the per-request stream.
+The admin server carries `AdminState { metrics, store, classifiers, counters }`
+(R29/R31/R33); `FromRef` hands each route only the substate it needs. The query
+API reads the same `DiffStore` the consumer writes to, so it reflects the
+periodic aggregation snapshots (staleness ≤ the aggregation interval) and the
+per-request stream.
 
 ```mermaid
 flowchart LR
     operator(["Operator / Prometheus"]) --> admin
 
-    subgraph admin ["Admin server — axum on server.port, admin_router (src/http/router.rs, R24/R29)"]
+    subgraph admin ["Admin server — axum on server.admin-port, admin_router (src/http/router.rs, R24/R29/R33)"]
         hz["GET /healthz → 204"]
         mx["GET /metrics → PrometheusHandle.render<br/>empty body when metrics.enabled=false<br/>(src/telemetry/metrics.rs)"]
         paths["GET /diffs/paths[?endpoint=]<br/>endpoints → diffing field paths<br/>(src/http/query.rs)"]
-        detail["GET /diffs/detail?endpoint=&path=<br/>raw counts + paginated samples;<br/>RegressionClassifier applied at read time (R31)<br/>(src/http/query.rs)"]
+        detail["GET /diffs/detail?endpoint=&path=<br/>raw counts + paginated samples;<br/>per-endpoint classifier applied at read time (R31/R33)<br/>(src/http/query.rs)"]
+        reset["DELETE /diffs?endpoint=<br/>clear an endpoint's aggregation + live buffer (R33)<br/>(src/http/query.rs)"]
     end
 
     paths -. "get/list_aggregations" .-> readstore
     detail -. "get_aggregation + recent_samples" .-> readstore
-    readstore[("DiffStore read side (R29)<br/>HGETALL / SCAN / XREVRANGE")]
+    reset -. "reset_aggregation + counters.reset_endpoint" .-> readstore
+    readstore[("DiffStore read side (R29)<br/>HGETALL / SCAN / XREVRANGE / DEL")]
 ```
 
 The store persists **raw counts only** (R31); `is_regression` and the
-relative/absolute percentages are derived in `diff_detail` at read time via
-`RegressionClassifier` (held in `AdminState`), so changing a threshold
+relative/absolute percentages are derived in `diff_detail` at read time. Each
+configured endpoint may carry its own thresholds, so the classifier is looked
+up per endpoint via `EndpointClassifiers` (held in `AdminState`), falling back
+to the diffy defaults for unmatched endpoints (R33); changing a threshold
 reclassifies everything instantly with no re-flush. Read methods on `DiffStore`
 (analysis-side only, never the hot path): `get_aggregation` (HGETALL one
 `riffy:agg:{endpoint}` hash, regrouping the flat `raw:{path}`/`noise:{path}`
 entries by path), `list_aggregations` (cursor SCAN `riffy:agg:*` + pipelined
 HGETALL), `recent_samples` (paged, newest-first XREVRANGE over `riffy:diffs`,
-filtered to one endpoint + field path, `offset`/`limit` paginated).
+filtered to one endpoint + field path, `offset`/`limit` paginated),
+`reset_aggregation` (DEL one `riffy:agg:{endpoint}` hash).
 
 | Query route | Response |
 |-------------|----------|
 | `GET /diffs/paths` | `{ "endpoints": [ { endpoint, total, paths[], last_updated } ] }`, sorted by endpoint |
 | `GET /diffs/paths?endpoint=<ep>` | one `{ endpoint, total, paths[], last_updated }`; 404 if unknown |
 | `GET /diffs/detail?endpoint=&path=` | `{ endpoint, path, total, raw_count, noise_count, is_regression, relative_difference, absolute_difference, last_updated, samples }` (`is_regression`/percentages computed at read time from the stored counts); `samples = { items[], limit, offset, has_more }`, newest-first; 404 if nothing recorded for that endpoint+path. `limit` default 20 / max 100 |
+| `DELETE /diffs?endpoint=<ep>` | clears the endpoint's stored aggregation counts and its live counter buffer; `204` on success, `404` if the endpoint has no recorded statistics. Samples age out via the stream cap, not purged here (R33) |
 
 | Metric | Labels | Emitted from |
 |--------|--------|--------------|
@@ -135,10 +142,20 @@ include abandoned requests (time until abandonment) and carry no survivorship
 bias. Consumer-side metrics need no guard — they run in a detached task that
 client cancellation cannot drop.
 
+**Trace export (R33):** when `logging.otlp.enabled` (off by default), spans are
+exported to a Jaeger collector over OTLP/HTTP (`logging.otlp.endpoint`, default
+the local Jaeger OTLP receiver) via a `tracing-opentelemetry` layer on the same
+subscriber. The batch exporter reuses reqwest/rustls and is flushed on shutdown.
+
 ## Data written to Redis
 
-**Stream entry** (`XADD riffy:diffs`), one per request that produced diffs or a
-status mismatch:
+The stream and aggregation **keys are fixed constants** — `storage::DIFF_STREAM_KEY`
+(`riffy:diffs`) and `storage::AGGREGATION_KEY_PREFIX` (`riffy:agg`), not config
+(R33). The backend (Redis vs in-memory), the `aggregation-interval`, and the
+`stream-cap` come from the `storage` config section.
+
+**Stream entry** (`XADD MAXLEN ~ riffy:diffs`, trimmed to `storage.stream-cap`),
+one per request that produced diffs or a status mismatch:
 
 | Field | Content |
 |-------|---------|
