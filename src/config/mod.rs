@@ -1,7 +1,4 @@
-use figment::{
-    providers::{Env, Format, Yaml},
-    Figment,
-};
+use config::{Config, Environment, File, FileFormat};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -160,13 +157,15 @@ fn default_true() -> bool {
 }
 
 pub fn load() -> anyhow::Result<Riffy> {
-    let config: Riffy = Figment::new()
-        .merge(Yaml::file("config.example.yaml"))
-        .merge(Yaml::file("config.yaml"))
-        .merge(
-            Env::prefixed("RIFFY_").map(|k| k.as_str().replace("__", ".").replace('_', "-").into()),
-        )
-        .extract()?;
+    // Layered: the example file is the base, an optional `config.yaml` overrides
+    // it, and `RIFFY_`-prefixed env vars override both. Nested keys use a `__`
+    // separator (e.g. `RIFFY_SERVER__PORT` → `server.port`).
+    let config: Riffy = Config::builder()
+        .add_source(File::new("config.example", FileFormat::Yaml).required(false))
+        .add_source(File::new("config", FileFormat::Yaml).required(false))
+        .add_source(Environment::with_prefix("RIFFY").separator("__"))
+        .build()?
+        .try_deserialize()?;
     config.validate()?;
     Ok(config)
 }

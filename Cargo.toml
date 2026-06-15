@@ -27,7 +27,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 async-compression = { version = "0.4", features = ["tokio", "gzip", "zlib", "brotli", "zstd"] }
 
 # Configuration
-figment = { version = "0.10", features = ["env", "yaml"] }
+config = { version = "0.15", default-features = false, features = ["yaml"] }
 humantime-serde = "1"
 
 # Redis
