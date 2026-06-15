@@ -1,11 +1,14 @@
-//! Verifies the config-rs wiring: serde kebab-case renames, `#[serde(default)]`
-//! fields, `humantime` durations, per-endpoint thresholds, and the internally
-//! tagged storage backend enum all deserialize through `config::Config`.
+//! Verifies the config-rs wiring: the embedded `default.yaml` base layer,
+//! deep-merge of partial overrides, serde kebab-case renames, `humantime`
+//! durations, per-endpoint thresholds, and the internally tagged storage
+//! backend enum.
 
-use crate::config::{Riffy, StorageBackend};
+use crate::config::{Riffy, StorageBackend, DEFAULT_CONFIG};
 use config::{Config, File, FileFormat};
 use std::time::Duration;
 
+/// Only the fields with no built-in default; everything else comes from the
+/// embedded `default.yaml`.
 const MINIMAL_YAML: &str = r#"
 upstream:
   baseline: "http://localhost:9100"
@@ -15,8 +18,10 @@ endpoints:
   - pattern: "/api/v1/users/:id"
 "#;
 
+/// Mirror `config::load`'s layering: embedded defaults, then the user source.
 fn parse(yaml: &str) -> Riffy {
     Config::builder()
+        .add_source(File::from_str(DEFAULT_CONFIG, FileFormat::Yaml))
         .add_source(File::from_str(yaml, FileFormat::Yaml))
         .build()
         .unwrap()
@@ -25,10 +30,10 @@ fn parse(yaml: &str) -> Riffy {
 }
 
 #[test]
-fn deserializes_minimal_config_with_defaults() {
+fn embedded_defaults_fill_omitted_sections() {
     let cfg = parse(MINIMAL_YAML);
 
-    // Omitted sections fall back to their defaults.
+    // All of these come from the embedded default.yaml, not the user config.
     assert_eq!(cfg.server.proxy_port, 7677);
     assert_eq!(cfg.server.admin_port, 7678);
     assert_eq!(cfg.pipeline.channel_capacity, 1024);
@@ -37,8 +42,6 @@ fn deserializes_minimal_config_with_defaults() {
     assert!(matches!(cfg.storage.backend, StorageBackend::InMemory));
     assert_eq!(cfg.upstream.timeout, Duration::from_secs(30));
     assert!(!cfg.proxy.allow_http_side_effects);
-
-    // OTLP export is off by default, with the endpoint pointing at local Jaeger.
     assert!(!cfg.logging.otlp.enabled);
     assert_eq!(cfg.logging.otlp.endpoint, "http://localhost:4318");
 
@@ -48,6 +51,17 @@ fn deserializes_minimal_config_with_defaults() {
     assert_eq!(endpoint.threshold.absolute, 0.03);
 
     assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn partial_storage_override_keeps_other_defaults() {
+    // Override only one storage field; the rest must deep-merge from defaults.
+    let yaml = format!("{MINIMAL_YAML}\nstorage:\n  aggregation-interval: 9s\n");
+    let cfg = parse(&yaml);
+
+    assert_eq!(cfg.storage.aggregation_interval, Duration::from_secs(9));
+    assert_eq!(cfg.storage.stream_cap, 10_000);
+    assert!(matches!(cfg.storage.backend, StorageBackend::InMemory));
 }
 
 #[test]

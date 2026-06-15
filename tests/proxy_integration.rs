@@ -67,7 +67,10 @@ fn test_config() -> Riffy {
         },
         logging: Logging {
             level: "info".to_owned(),
-            otlp: Otlp::default(),
+            otlp: Otlp {
+                enabled: false,
+                endpoint: "http://localhost:4318".to_owned(),
+            },
         },
         metrics: Metrics {
             enabled: false,

@@ -1,0 +1,35 @@
+# Built-in configuration defaults, embedded into the binary via include_str!.
+# This is the base layer; config.example.yaml, config.yaml, RIFFY_* env vars,
+# and CLI args all override it. Fields with no sensible default (the upstream
+# addresses and the endpoint list) are intentionally absent and must be
+# supplied by the user.
+
+proxy:
+  allow-http-side-effects: false
+
+pipeline:
+  channel-capacity: 1024
+
+upstream:
+  timeout: 30s
+
+storage:
+  aggregation-interval: 1s
+  stream-cap: 10000
+  backend:
+    type: in-memory
+
+server:
+  address: "0.0.0.0"
+  proxy-port: 7677
+  admin-port: 7678
+
+logging:
+  level: info
+  otlp:
+    enabled: false
+    endpoint: "http://localhost:4318"
+
+metrics:
+  enabled: true
+  port: 9090

@@ -5,31 +5,29 @@ use std::time::Duration;
 #[cfg(test)]
 mod tests;
 
+/// Built-in defaults, embedded at compile time and layered first. Section
+/// defaults live here rather than in per-field `#[serde(default)]` attributes;
+/// see `default.yaml`.
+pub(crate) const DEFAULT_CONFIG: &str = include_str!("default.yaml");
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Riffy {
-    #[serde(default)]
     pub proxy: Proxy,
-    #[serde(default)]
     pub pipeline: Pipeline,
     pub upstream: Upstream,
     /// Endpoints to analyze; each carries its own regression thresholds
     /// (defaulting to the diffy values when omitted).
     pub endpoints: Vec<EndpointConfig>,
-    #[serde(default)]
     pub storage: Storage,
-    #[serde(default)]
     pub server: Server,
-    #[serde(default)]
     pub logging: Logging,
-    #[serde(default)]
     pub metrics: Metrics,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Proxy {
-    #[serde(default)]
     pub allow_http_side_effects: bool,
 }
 
@@ -39,20 +37,7 @@ pub struct Pipeline {
     /// Bounded capacity of the proxy → analysis-consumer channel. When the
     /// consumer falls behind, new messages are dropped with a warning
     /// (backpressure by shedding, never unbounded queueing).
-    #[serde(default = "default_channel_capacity")]
     pub channel_capacity: usize,
-}
-
-fn default_channel_capacity() -> usize {
-    1024
-}
-
-impl Default for Pipeline {
-    fn default() -> Self {
-        Self {
-            channel_capacity: default_channel_capacity(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,16 +48,13 @@ pub struct Upstream {
     pub baseline: String,
     pub control: String,
     pub candidate: String,
-    #[serde(default = "default_timeout", with = "humantime_serde")]
+    #[serde(with = "humantime_serde")]
     pub timeout: Duration,
 }
 
-fn default_timeout() -> Duration {
-    Duration::from_secs(30)
-}
-
 /// Per-field regression thresholds (diffy's noise filter). Defaults are the
-/// diffy values: 20% relative, 0.03% absolute.
+/// diffy values: 20% relative, 0.03% absolute. These are per-endpoint, so they
+/// stay in code rather than `default.yaml`.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Threshold {
@@ -115,155 +97,61 @@ pub struct EndpointConfig {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Storage {
-    #[serde(default = "default_aggregation_interval", with = "humantime_serde")]
+    #[serde(with = "humantime_serde")]
     pub aggregation_interval: Duration,
-    #[serde(default = "default_stream_cap")]
     pub stream_cap: usize,
-    #[serde(default)]
     pub backend: StorageBackend,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum StorageBackend {
     /// In-memory store (no persistence across restarts) — the default.
-    #[default]
     InMemory,
     /// Redis-backed store. Stream and aggregation keys are fixed constants
     /// (`storage::DIFF_STREAM_KEY` / `storage::AGGREGATION_KEY_PREFIX`).
     Redis { uri: String },
 }
 
-fn default_aggregation_interval() -> Duration {
-    Duration::from_secs(1)
-}
-
-fn default_stream_cap() -> usize {
-    10_000
-}
-
-impl Default for Storage {
-    fn default() -> Self {
-        Self {
-            aggregation_interval: default_aggregation_interval(),
-            stream_cap: default_stream_cap(),
-            backend: StorageBackend::default(),
-        }
-    }
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Server {
-    #[serde(default = "default_address")]
     pub address: String,
-    #[serde(default = "default_proxy_port")]
     pub proxy_port: u16,
-    #[serde(default = "default_admin_port")]
     pub admin_port: u16,
-}
-
-fn default_address() -> String {
-    "0.0.0.0".to_string()
-}
-
-fn default_proxy_port() -> u16 {
-    7677
-}
-
-fn default_admin_port() -> u16 {
-    7678
-}
-
-impl Default for Server {
-    fn default() -> Self {
-        Self {
-            address: default_address(),
-            proxy_port: default_proxy_port(),
-            admin_port: default_admin_port(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Logging {
-    #[serde(default = "default_log_level")]
     pub level: String,
     /// OTLP trace export (to a Jaeger collector). Off by default; the endpoint
     /// still points at a local Jaeger so it is ready to enable.
-    #[serde(default)]
     pub otlp: Otlp,
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
-impl Default for Logging {
-    fn default() -> Self {
-        Self {
-            level: default_log_level(),
-            otlp: Otlp::default(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Otlp {
-    #[serde(default)]
     pub enabled: bool,
     /// OTLP/HTTP base endpoint of the collector (Jaeger's OTLP receiver on
     /// 4318). The `/v1/traces` path is appended by the exporter.
-    #[serde(default = "default_otlp_endpoint")]
     pub endpoint: String,
-}
-
-fn default_otlp_endpoint() -> String {
-    "http://localhost:4318".to_string()
-}
-
-impl Default for Otlp {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            endpoint: default_otlp_endpoint(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Metrics {
-    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_metrics_port")]
     pub port: u16,
 }
 
-fn default_metrics_port() -> u16 {
-    9090
-}
-
-fn default_true() -> bool {
-    true
-}
-
-impl Default for Metrics {
-    fn default() -> Self {
-        Self {
-            enabled: default_true(),
-            port: default_metrics_port(),
-        }
-    }
-}
-
 pub fn load() -> anyhow::Result<Riffy> {
-    // Layered: the example file is the base, an optional `config.yaml` overrides
-    // it, and `RIFFY_`-prefixed env vars override both. Nested keys use a `__`
-    // separator (e.g. `RIFFY_SERVER__PROXY_PORT` → `server.proxy-port`).
+    // Layered: embedded defaults are the base, the example file and an optional
+    // `config.yaml` override them, and `RIFFY_`-prefixed env vars override all.
+    // Nested keys use a `__` separator (e.g. `RIFFY_SERVER__PROXY_PORT`).
     let config: Riffy = Config::builder()
+        .add_source(File::from_str(DEFAULT_CONFIG, FileFormat::Yaml))
         .add_source(File::new("config.example", FileFormat::Yaml).required(false))
         .add_source(File::new("config", FileFormat::Yaml).required(false))
         .add_source(Environment::with_prefix("RIFFY").separator("__"))
