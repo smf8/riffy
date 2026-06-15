@@ -190,6 +190,10 @@ impl Default for Server {
 pub struct Logging {
     #[serde(default = "default_log_level")]
     pub level: String,
+    /// OTLP trace export (to a Jaeger collector). Off by default; the endpoint
+    /// still points at a local Jaeger so it is ready to enable.
+    #[serde(default)]
+    pub otlp: Otlp,
 }
 
 fn default_log_level() -> String {
@@ -200,6 +204,31 @@ impl Default for Logging {
     fn default() -> Self {
         Self {
             level: default_log_level(),
+            otlp: Otlp::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Otlp {
+    #[serde(default)]
+    pub enabled: bool,
+    /// OTLP/HTTP base endpoint of the collector (Jaeger's OTLP receiver on
+    /// 4318). The `/v1/traces` path is appended by the exporter.
+    #[serde(default = "default_otlp_endpoint")]
+    pub endpoint: String,
+}
+
+fn default_otlp_endpoint() -> String {
+    "http://localhost:4318".to_string()
+}
+
+impl Default for Otlp {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_otlp_endpoint(),
         }
     }
 }

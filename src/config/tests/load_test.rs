@@ -38,6 +38,10 @@ fn deserializes_minimal_config_with_defaults() {
     assert_eq!(cfg.upstream.timeout, Duration::from_secs(30));
     assert!(!cfg.proxy.allow_http_side_effects);
 
+    // OTLP export is off by default, with the endpoint pointing at local Jaeger.
+    assert!(!cfg.logging.otlp.enabled);
+    assert_eq!(cfg.logging.otlp.endpoint, "http://localhost:4318");
+
     // Endpoint without an explicit threshold gets the diffy defaults.
     let endpoint = &cfg.endpoints[0];
     assert_eq!(endpoint.threshold.relative, 20.0);

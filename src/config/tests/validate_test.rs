@@ -36,6 +36,7 @@ fn valid_config() -> Riffy {
         },
         logging: Logging {
             level: "info".to_owned(),
+            otlp: Otlp::default(),
         },
         metrics: Metrics {
             enabled: true,

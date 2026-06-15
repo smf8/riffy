@@ -46,6 +46,11 @@ server:
 
 logging:
   level: info
+  # OTLP trace export to a Jaeger collector (its OTLP/HTTP receiver, port 4318).
+  # Disabled by default; the endpoint already points at a local Jaeger.
+  otlp:
+    enabled: false
+    endpoint: "http://localhost:4318"
 
 metrics:
   enabled: true

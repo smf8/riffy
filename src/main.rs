@@ -18,7 +18,7 @@ use std::sync::Arc;
 async fn main() -> anyhow::Result<()> {
     // Load config
     let cfg = config::load()?;
-    telemetry::init_tracing(&cfg.logging);
+    let tracer_provider = telemetry::init_tracing(&cfg.logging)?;
 
     tracing::info!(service = riffy::SERVICE_NAME, "starting riffy");
 
@@ -136,6 +136,13 @@ async fn main() -> anyhow::Result<()> {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!(error = %e, "analysis consumer task failed"),
         Err(_) => tracing::warn!("analysis consumer did not stop within 5s"),
+    }
+
+    // Flush any buffered spans to the OTLP collector before exiting.
+    if let Some(provider) = tracer_provider {
+        if let Err(e) = provider.shutdown() {
+            tracing::warn!(error = %e, "failed to shut down tracer provider");
+        }
     }
 
     Ok(())

@@ -11,8 +11,8 @@ use axum::routing::any;
 use axum::{Json, Router};
 use riffy::analysis::counters::LiveCounters;
 use riffy::config::{
-    EndpointConfig, Logging, Metrics, Pipeline, Proxy, Riffy, Server, Storage, StorageBackend,
-    Threshold, Upstream,
+    EndpointConfig, Logging, Metrics, Otlp, Pipeline, Proxy, Riffy, Server, Storage,
+    StorageBackend, Threshold, Upstream,
 };
 use riffy::endpoint::EndpointMatcher;
 use riffy::http::router::{create_router, AppState};
@@ -67,6 +67,7 @@ fn test_config() -> Riffy {
         },
         logging: Logging {
             level: "info".to_owned(),
+            otlp: Otlp::default(),
         },
         metrics: Metrics {
             enabled: false,

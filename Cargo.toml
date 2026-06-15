@@ -48,6 +48,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["chrono", "json", "env-filter"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+opentelemetry = "0.32.0"
+opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "reqwest-client", "reqwest-rustls"] }
+tracing-opentelemetry = "0.33.0"
 
 # Allocator
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
