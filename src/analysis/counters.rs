@@ -106,6 +106,12 @@ impl LiveCounters {
         out
     }
 
+    /// Drop all buffered counts for one endpoint. Used by the admin reset so
+    /// pending deltas don't immediately re-populate the store after a clear.
+    pub fn reset_endpoint(&self, endpoint: &str) {
+        self.endpoints.remove(endpoint);
+    }
+
     /// Add drained deltas back into the buffer. Used to retry a flush whose
     /// store write failed, so a transient backend error never drops counts.
     pub fn restore(&self, deltas: &[EndpointAggregation]) {

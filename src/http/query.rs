@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::analysis::classify::RegressionClassifier;
+use crate::analysis::counters::LiveCounters;
 use crate::error::AppError;
 use crate::storage::{DiffStore, EndpointAggregation, FieldAggregation, SamplePage};
 
@@ -151,4 +153,33 @@ pub async fn diff_detail(
         samples,
     })
     .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetQuery {
+    pub endpoint: String,
+}
+
+/// `DELETE /diffs?endpoint=<ep>` — clear all recorded statistics for one
+/// endpoint: its stored aggregation counts and any counts still buffered in the
+/// live counters. Per-request samples are left to age out via the stream cap.
+/// 404 if the endpoint has no recorded statistics.
+pub async fn reset_stats(
+    State(store): State<Arc<dyn DiffStore>>,
+    State(counters): State<Arc<LiveCounters>>,
+    Query(query): Query<ResetQuery>,
+) -> Result<StatusCode, AppError> {
+    if store.get_aggregation(&query.endpoint).await?.is_none() {
+        return Err(AppError::NotFound(format!(
+            "no statistics recorded for endpoint '{}'",
+            query.endpoint
+        )));
+    }
+
+    // Clear the buffer first so an in-flight flush can't re-add stale counts
+    // after the store is cleared.
+    counters.reset_endpoint(&query.endpoint);
+    store.reset_aggregation(&query.endpoint).await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

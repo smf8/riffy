@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 use super::error::StoreError;
 use super::{DiffEntry, DiffSample, DiffStore, EndpointAggregation, FieldAggregation, SamplePage};
 use crate::compare::flatten::FieldDiff;
-use ::redis::aio::ConnectionManager;
-use ::redis::streams::{StreamId, StreamRangeReply};
-use ::redis::{from_redis_value, AsyncCommands, Value};
 use chrono::{DateTime, Utc};
+use redis::aio::ConnectionManager;
+use redis::streams::{StreamId, StreamRangeReply};
+use redis::{from_redis_value, AsyncCommands, Value};
 
 /// Redis-backed `DiffStore`: per-request diffs go to a stream (`XADD`),
 /// aggregation snapshots to one hash per endpoint (`HSET`, pipelined).
@@ -23,7 +23,7 @@ impl RedisDiffStore {
         stream_key: String,
         aggregation_key_prefix: String,
     ) -> Result<Self, StoreError> {
-        let client = ::redis::Client::open(uri).map_err(StoreError::Redis)?;
+        let client = redis::Client::open(uri).map_err(StoreError::Redis)?;
         let conn = ConnectionManager::new(client)
             .await
             .map_err(StoreError::Redis)?;
@@ -77,7 +77,7 @@ impl DiffStore for RedisDiffStore {
         // instead of overwriting; per-field counts live as flat `raw:{path}` /
         // `noise:{path}` hash entries so HINCRBY can target them directly.
         // Atomic so a reader never observes a half-applied flush.
-        let mut pipe = ::redis::pipe();
+        let mut pipe = redis::pipe();
         pipe.atomic();
         for delta in deltas {
             let key = format!("{}:{}", self.aggregation_key_prefix, delta.endpoint);
@@ -130,7 +130,7 @@ impl DiffStore for RedisDiffStore {
         let mut cursor: u64 = 0;
         let mut keys: HashSet<String> = HashSet::new();
         loop {
-            let (next, batch): (u64, Vec<String>) = ::redis::cmd("SCAN")
+            let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
                 .arg(cursor)
                 .arg("MATCH")
                 .arg(&pattern)
@@ -152,7 +152,7 @@ impl DiffStore for RedisDiffStore {
 
         // One pipelined round-trip for every endpoint hash.
         let keys: Vec<String> = keys.into_iter().collect();
-        let mut pipe = ::redis::pipe();
+        let mut pipe = redis::pipe();
         for key in &keys {
             pipe.hgetall(key);
         }
@@ -170,6 +170,13 @@ impl DiffStore for RedisDiffStore {
             out.push(parse_aggregation(endpoint, &map)?);
         }
         Ok(out)
+    }
+
+    async fn reset_aggregation(&self, endpoint: &str) -> Result<(), StoreError> {
+        let key = format!("{}:{}", self.aggregation_key_prefix, endpoint);
+        let mut conn = self.conn.clone();
+        let _: () = conn.del(&key).await.map_err(StoreError::Redis)?;
+        Ok(())
     }
 
     async fn recent_samples(

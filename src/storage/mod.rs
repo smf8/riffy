@@ -121,6 +121,11 @@ pub trait DiffStore: Send + Sync {
     /// List the latest aggregation snapshot for every recorded endpoint.
     async fn list_aggregations(&self) -> Result<Vec<EndpointAggregation>, StoreError>;
 
+    /// Clear the stored aggregation counts for one endpoint (admin reset).
+    /// Per-request samples are not purged — they are bounded by the stream cap
+    /// and age out on their own; only the statistics are reset.
+    async fn reset_aggregation(&self, endpoint: &str) -> Result<(), StoreError>;
+
     /// Page through recorded per-request diff samples for one endpoint + field
     /// path, newest first. `offset`/`limit` paginate the matching samples.
     async fn recent_samples(

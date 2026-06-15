@@ -109,6 +109,22 @@ fn drain_resets_the_buffer() {
 }
 
 #[test]
+fn reset_endpoint_drops_buffered_counts() {
+    let collector = LiveCounters::new();
+    let diffs = flatten_value(&json!({"a": 1}), &json!({"a": 2}));
+
+    collector.record("/one", &diffs, &HashMap::new());
+    collector.record("/two", &diffs, &HashMap::new());
+
+    collector.reset_endpoint("/one");
+
+    // Only the untouched endpoint survives the reset.
+    let deltas = collector.drain();
+    assert_eq!(deltas.len(), 1);
+    assert_eq!(deltas[0].endpoint, "/two");
+}
+
+#[test]
 fn restore_reinjects_drained_counts() {
     let collector = LiveCounters::new();
     let diffs = flatten_value(&json!({"a": 1}), &json!({"a": 2}));

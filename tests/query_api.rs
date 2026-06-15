@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use riffy::analysis::classify::RegressionClassifier;
+use riffy::analysis::counters::LiveCounters;
 use riffy::compare::flatten::{DiffType, FieldDiff};
 use riffy::http::router::{admin_router, AdminState};
 use riffy::storage::{
@@ -20,6 +21,7 @@ async fn spawn_admin(store: Arc<dyn DiffStore>) -> SocketAddr {
         metrics: None,
         store,
         classifier: RegressionClassifier::new(20.0, 0.03),
+        counters: Arc::new(LiveCounters::new()),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -191,6 +193,53 @@ async fn diff_detail_returns_stats_and_paginated_samples() {
     let resp = client
         .get(format!("http://{addr}/diffs/detail"))
         .query(&[("endpoint", "/api/v1/users/:id"), ("path", "nope")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn reset_stats_clears_endpoint_and_404s_when_absent() {
+    let store = Arc::new(InMemoryDiffStore::new());
+
+    let mut fields = HashMap::new();
+    fields.insert("user.name".to_owned(), field(5, 1));
+    store
+        .add_aggregation(&[EndpointAggregation {
+            endpoint: "/api/v1/users/:id".to_owned(),
+            total: 10,
+            fields,
+            last_updated: Utc::now(),
+        }])
+        .await
+        .unwrap();
+
+    let addr = spawn_admin(store).await;
+    let client = http_client();
+
+    // Reset clears the endpoint's stats → 204 No Content.
+    let resp = client
+        .delete(format!("http://{addr}/diffs"))
+        .query(&[("endpoint", "/api/v1/users/:id")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    // The endpoint's aggregation is gone now → a paths lookup 404s.
+    let resp = client
+        .get(format!("http://{addr}/diffs/paths"))
+        .query(&[("endpoint", "/api/v1/users/:id")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    // Resetting an endpoint with no recorded stats → 404.
+    let resp = client
+        .delete(format!("http://{addr}/diffs"))
+        .query(&[("endpoint", "/api/v1/users/:id")])
         .send()
         .await
         .unwrap();

@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     let consumer_handle = Consumer::new(
         analysis_rx,
         matcher.clone(),
-        collector,
+        collector.clone(),
         store.clone(),
         aggregation_interval,
     )
@@ -108,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
         metrics: metrics_handle,
         store,
         classifier: filter,
+        counters: collector,
     });
     let admin_addr = format!("{}:{}", cfg.server.address, cfg.server.port);
     let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;

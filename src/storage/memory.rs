@@ -65,6 +65,11 @@ impl DiffStore for InMemoryDiffStore {
         Ok(self.aggregations.lock().await.values().cloned().collect())
     }
 
+    async fn reset_aggregation(&self, endpoint: &str) -> Result<(), StoreError> {
+        self.aggregations.lock().await.remove(endpoint);
+        Ok(())
+    }
+
     async fn recent_samples(
         &self,
         endpoint: &str,

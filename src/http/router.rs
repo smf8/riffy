@@ -1,5 +1,6 @@
 use super::{forward, query};
 use crate::analysis::classify::RegressionClassifier;
+use crate::analysis::counters::LiveCounters;
 use crate::config::Riffy;
 use crate::endpoint::EndpointMatcher;
 use crate::pipeline::AnalysisMessage;
@@ -7,7 +8,7 @@ use crate::storage::DiffStore;
 use crate::telemetry::metrics::{render_metrics, track_proxy};
 use crate::upstream::client::UpstreamClient;
 use axum::extract::FromRef;
-use axum::routing::{any, get};
+use axum::routing::{any, delete, get};
 use axum::{middleware, Router};
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
@@ -38,6 +39,7 @@ pub struct AdminState {
     pub metrics: Option<PrometheusHandle>,
     pub store: Arc<dyn DiffStore>,
     pub classifier: RegressionClassifier,
+    pub counters: Arc<LiveCounters>,
 }
 
 impl FromRef<AdminState> for Option<PrometheusHandle> {
@@ -58,6 +60,12 @@ impl FromRef<AdminState> for RegressionClassifier {
     }
 }
 
+impl FromRef<AdminState> for Arc<LiveCounters> {
+    fn from_ref(state: &AdminState) -> Self {
+        state.counters.clone()
+    }
+}
+
 /// Admin router: health check, Prometheus metrics, and the diff query API.
 /// `/metrics` renders an empty body when metrics are disabled (no handle
 /// installed).
@@ -67,6 +75,7 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/metrics", get(render_metrics))
         .route("/diffs/paths", get(query::list_paths))
         .route("/diffs/detail", get(query::diff_detail))
+        .route("/diffs", delete(query::reset_stats))
         .with_state(state)
 }
 
