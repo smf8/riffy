@@ -39,6 +39,8 @@ fn embedded_defaults_fill_omitted_sections() {
     assert_eq!(cfg.pipeline.channel_capacity, 1024);
     assert_eq!(cfg.storage.stream_cap, 10_000);
     assert_eq!(cfg.storage.aggregation_interval, Duration::from_secs(1));
+    assert_eq!(cfg.storage.window, Duration::from_secs(3600));
+    assert_eq!(cfg.storage.bucket, Duration::from_secs(60));
     assert!(matches!(cfg.storage.backend, StorageBackend::InMemory));
     assert_eq!(cfg.upstream.timeout, Duration::from_secs(30));
     assert!(!cfg.proxy.allow_http_side_effects);

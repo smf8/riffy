@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::compare::flatten::{DiffType, FieldDiff};
 use crate::storage::{
@@ -170,4 +171,47 @@ async fn append_diff_trims_oldest_past_cap() {
         entries[1].raw_fields.get("x").unwrap().left,
         Some(json!("l2"))
     );
+}
+
+fn total_delta(endpoint: &str, total: u64) -> Vec<EndpointAggregation> {
+    vec![EndpointAggregation {
+        endpoint: endpoint.to_owned(),
+        total,
+        fields: HashMap::new(),
+        last_updated: Utc::now(),
+    }]
+}
+
+#[tokio::test]
+async fn windowed_aggregation_sums_recent_buckets() {
+    // 1s buckets, 10s window: two adds ~1.1s apart land in different buckets
+    // but both within the window, so reads sum them.
+    let store = InMemoryDiffStore::with_retention(
+        usize::MAX,
+        Duration::from_secs(1),
+        Duration::from_secs(10),
+    );
+
+    store.add_aggregation(&total_delta("/e", 3)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    store.add_aggregation(&total_delta("/e", 4)).await.unwrap();
+
+    let agg = store.get_aggregation("/e").await.unwrap().unwrap();
+    assert_eq!(agg.total, 7);
+}
+
+#[tokio::test]
+async fn aggregation_ages_out_of_the_window() {
+    // 1s buckets, 1s window: a count is visible now, gone once the window passes.
+    let store = InMemoryDiffStore::with_retention(
+        usize::MAX,
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    );
+
+    store.add_aggregation(&total_delta("/e", 5)).await.unwrap();
+    assert!(store.get_aggregation("/e").await.unwrap().is_some());
+
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    assert!(store.get_aggregation("/e").await.unwrap().is_none());
 }

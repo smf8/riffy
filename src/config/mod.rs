@@ -118,6 +118,14 @@ pub struct Storage {
     #[serde(with = "humantime_serde")]
     pub aggregation_interval: Duration,
     pub stream_cap: usize,
+    /// Read/retention window: aggregation counts older than this age out, so the
+    /// regression verdict reflects only recent traffic.
+    #[serde(with = "humantime_serde")]
+    pub window: Duration,
+    /// Time-bucket granularity within the window (counts are bucketed at this
+    /// resolution).
+    #[serde(with = "humantime_serde")]
+    pub bucket: Duration,
     pub backend: StorageBackend,
 }
 
@@ -268,6 +276,14 @@ impl Riffy {
         ensure!(
             self.storage.stream_cap > 0,
             "storage.stream-cap must be > 0"
+        );
+        ensure!(
+            self.storage.bucket.as_secs() >= 1,
+            "storage.bucket must be >= 1s"
+        );
+        ensure!(
+            self.storage.window >= self.storage.bucket,
+            "storage.window must be >= storage.bucket"
         );
         if let StorageBackend::Redis { uri } = &self.storage.backend {
             ensure!(

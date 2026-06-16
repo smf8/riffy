@@ -76,14 +76,23 @@ async fn main() -> anyhow::Result<()> {
     let aggregation_interval = cfg.storage.aggregation_interval;
     let store: Arc<dyn DiffStore> = match &cfg.storage.backend {
         StorageBackend::Redis { uri } => {
-            let store = RedisDiffStore::connect(uri, cfg.storage.stream_cap)
-                .await
-                .context("failed to connect to redis")?;
+            let store = RedisDiffStore::connect(
+                uri,
+                cfg.storage.stream_cap,
+                cfg.storage.bucket,
+                cfg.storage.window,
+            )
+            .await
+            .context("failed to connect to redis")?;
             Arc::new(store)
         }
         StorageBackend::InMemory => {
             tracing::info!("using in-memory diff store (no persistence)");
-            Arc::new(InMemoryDiffStore::with_capacity(cfg.storage.stream_cap))
+            Arc::new(InMemoryDiffStore::with_retention(
+                cfg.storage.stream_cap,
+                cfg.storage.bucket,
+                cfg.storage.window,
+            ))
         }
     };
 

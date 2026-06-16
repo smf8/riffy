@@ -1,11 +1,21 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use super::error::StoreError;
 use super::{
-    DiffEntry, DiffSample, DiffStore, EndpointAggregation, FieldAggregation, SamplePage,
-    AGGREGATION_KEY_PREFIX, DIFF_STREAM_KEY,
+    current_bucket, merge_aggregation, window_bucket_count, DiffEntry, DiffSample, DiffStore,
+    EndpointAggregation, FieldAggregation, SamplePage, AGGREGATION_KEY_PREFIX, DIFF_STREAM_KEY,
 };
 use crate::compare::flatten::FieldDiff;
+
+/// Redis set tracking every endpoint with stored aggregation buckets, so the
+/// read API can enumerate endpoints without scanning the keyspace.
+const ENDPOINTS_INDEX: &str = "riffy:agg:__endpoints__";
+
+/// Key for one endpoint's aggregation bucket: `riffy:agg:{endpoint}:{bucket}`.
+fn bucket_key(endpoint: &str, bucket: u64) -> String {
+    format!("{AGGREGATION_KEY_PREFIX}:{endpoint}:{bucket}")
+}
 use chrono::{DateTime, Utc};
 use redis::aio::ConnectionManager;
 use redis::streams::{StreamId, StreamMaxlen, StreamRangeReply};
@@ -17,19 +27,32 @@ pub struct RedisDiffStore {
     conn: ConnectionManager,
     /// Approximate cap on the diff stream length (`XADD MAXLEN ~`).
     stream_cap: usize,
+    /// Aggregation time-bucket size and read window, in seconds.
+    bucket_secs: u64,
+    window_secs: u64,
 }
 
 impl RedisDiffStore {
     /// Connect with an auto-reconnecting multiplexed connection. The stream and
     /// aggregation keys are fixed constants (`DIFF_STREAM_KEY` /
     /// `AGGREGATION_KEY_PREFIX`), not configuration.
-    pub async fn connect(uri: &str, stream_cap: usize) -> Result<Self, StoreError> {
+    pub async fn connect(
+        uri: &str,
+        stream_cap: usize,
+        bucket: Duration,
+        window: Duration,
+    ) -> Result<Self, StoreError> {
         let client = redis::Client::open(uri).map_err(StoreError::Redis)?;
         let conn = ConnectionManager::new(client)
             .await
             .map_err(StoreError::Redis)?;
 
-        Ok(Self { conn, stream_cap })
+        Ok(Self {
+            conn,
+            stream_cap,
+            bucket_secs: bucket.as_secs().max(1),
+            window_secs: window.as_secs().max(1),
+        })
     }
 }
 
@@ -76,15 +99,20 @@ impl DiffStore for RedisDiffStore {
             return Ok(());
         }
 
-        // One atomic (MULTI/EXEC), pipelined round-trip for all endpoints. Each
-        // count is an HINCRBY so concurrent instances sum into the same hash
-        // instead of overwriting; per-field counts live as flat `raw:{path}` /
-        // `noise:{path}` hash entries so HINCRBY can target them directly.
-        // Atomic so a reader never observes a half-applied flush.
+        // Counts go into the current time bucket key. Each is an HINCRBY so
+        // concurrent instances sum into the same bucket instead of overwriting;
+        // per-field counts are flat `raw:{path}` / `noise:{path}` entries so
+        // HINCRBY can target them. Each bucket gets a TTL (window + one bucket)
+        // so old data ages out — reads only ever see the retention window.
+        // Atomic (MULTI/EXEC) so a reader never observes a half-applied flush.
+        let now = chrono::Utc::now();
+        let bucket = current_bucket(self.bucket_secs);
+        let ttl = (self.window_secs + self.bucket_secs) as i64;
+
         let mut pipe = redis::pipe();
         pipe.atomic();
         for delta in deltas {
-            let key = format!("{}:{}", AGGREGATION_KEY_PREFIX, delta.endpoint);
+            let key = bucket_key(&delta.endpoint, bucket);
             if delta.total > 0 {
                 pipe.hincr(&key, "total", delta.total).ignore();
             }
@@ -98,8 +126,9 @@ impl DiffStore for RedisDiffStore {
                         .ignore();
                 }
             }
-            pipe.hset(&key, "last_updated", delta.last_updated.to_rfc3339())
-                .ignore();
+            pipe.hset(&key, "last_updated", now.to_rfc3339()).ignore();
+            pipe.expire(&key, ttl).ignore();
+            pipe.sadd(ENDPOINTS_INDEX, &delta.endpoint).ignore();
         }
 
         let mut conn = self.conn.clone();
@@ -115,22 +144,53 @@ impl DiffStore for RedisDiffStore {
         &self,
         endpoint: &str,
     ) -> Result<Option<EndpointAggregation>, StoreError> {
-        let key = format!("{}:{}", AGGREGATION_KEY_PREFIX, endpoint);
+        // Sum the window's bucket keys in one pipelined round-trip.
+        let current = current_bucket(self.bucket_secs);
+        let count = window_bucket_count(self.window_secs, self.bucket_secs);
+
         let mut conn = self.conn.clone();
-        let map: HashMap<String, String> = conn.hgetall(&key).await.map_err(StoreError::Redis)?;
-        if map.is_empty() {
-            return Ok(None);
+        let mut pipe = redis::pipe();
+        for i in 0..count {
+            pipe.hgetall(bucket_key(endpoint, current.saturating_sub(i)));
         }
-        Ok(Some(parse_aggregation(endpoint.to_owned(), &map)?))
+        let maps: Vec<HashMap<String, String>> = pipe
+            .query_async(&mut conn)
+            .await
+            .map_err(StoreError::Redis)?;
+
+        let mut acc = None;
+        for map in maps {
+            if map.is_empty() {
+                continue;
+            }
+            merge_aggregation(&mut acc, parse_aggregation(endpoint.to_owned(), &map)?);
+        }
+        Ok(acc)
     }
 
     async fn list_aggregations(&self) -> Result<Vec<EndpointAggregation>, StoreError> {
         let mut conn = self.conn.clone();
-        let prefix = format!("{}:", AGGREGATION_KEY_PREFIX);
-        let pattern = format!("{prefix}*");
+        let endpoints: Vec<String> = conn
+            .smembers(ENDPOINTS_INDEX)
+            .await
+            .map_err(StoreError::Redis)?;
 
-        // Cursor-based SCAN instead of KEYS so a large keyspace never blocks
-        // the server. SCAN may repeat keys, so dedup before fetching.
+        let mut out = Vec::new();
+        for endpoint in endpoints {
+            // Skip endpoints whose buckets have all aged out of the window.
+            if let Some(agg) = self.get_aggregation(&endpoint).await? {
+                out.push(agg);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn reset_aggregation(&self, endpoint: &str) -> Result<(), StoreError> {
+        let mut conn = self.conn.clone();
+
+        // Delete every bucket key for this endpoint (cursor SCAN, not KEYS), and
+        // drop it from the index set.
+        let pattern = format!("{AGGREGATION_KEY_PREFIX}:{endpoint}:*");
         let mut cursor: u64 = 0;
         let mut keys: HashSet<String> = HashSet::new();
         loop {
@@ -150,36 +210,21 @@ impl DiffStore for RedisDiffStore {
             }
         }
 
-        if keys.is_empty() {
-            return Ok(Vec::new());
+        if !keys.is_empty() {
+            let mut pipe = redis::pipe();
+            for key in &keys {
+                pipe.del(key).ignore();
+            }
+            let _: () = pipe
+                .query_async(&mut conn)
+                .await
+                .map_err(StoreError::Redis)?;
         }
 
-        // One pipelined round-trip for every endpoint hash.
-        let keys: Vec<String> = keys.into_iter().collect();
-        let mut pipe = redis::pipe();
-        for key in &keys {
-            pipe.hgetall(key);
-        }
-        let maps: Vec<HashMap<String, String>> = pipe
-            .query_async(&mut conn)
+        let _: () = conn
+            .srem(ENDPOINTS_INDEX, endpoint)
             .await
             .map_err(StoreError::Redis)?;
-
-        let mut out = Vec::with_capacity(keys.len());
-        for (key, map) in keys.iter().zip(maps) {
-            if map.is_empty() {
-                continue;
-            }
-            let endpoint = key.strip_prefix(&prefix).unwrap_or(key).to_owned();
-            out.push(parse_aggregation(endpoint, &map)?);
-        }
-        Ok(out)
-    }
-
-    async fn reset_aggregation(&self, endpoint: &str) -> Result<(), StoreError> {
-        let key = format!("{}:{}", AGGREGATION_KEY_PREFIX, endpoint);
-        let mut conn = self.conn.clone();
-        let _: () = conn.del(&key).await.map_err(StoreError::Redis)?;
         Ok(())
     }
 

@@ -79,6 +79,35 @@ impl FieldAggregation {
     }
 }
 
+/// The current time-bucket id for a bucket size in seconds.
+pub(crate) fn current_bucket(bucket_secs: u64) -> u64 {
+    (Utc::now().timestamp().max(0) as u64) / bucket_secs.max(1)
+}
+
+/// Number of buckets covered by the read window (at least one).
+pub(crate) fn window_bucket_count(window_secs: u64, bucket_secs: u64) -> u64 {
+    (window_secs / bucket_secs.max(1)).max(1)
+}
+
+/// Merge one bucket's aggregation into a windowed accumulator: sum the counts,
+/// keep the latest `last_updated`.
+pub(crate) fn merge_aggregation(acc: &mut Option<EndpointAggregation>, other: EndpointAggregation) {
+    match acc {
+        None => *acc = Some(other),
+        Some(a) => {
+            a.total += other.total;
+            if other.last_updated > a.last_updated {
+                a.last_updated = other.last_updated;
+            }
+            for (path, field) in other.fields {
+                let entry = a.fields.entry(path).or_default();
+                entry.raw_count += field.raw_count;
+                entry.noise_count += field.noise_count;
+            }
+        }
+    }
+}
+
 /// One stored per-request difference observed at a single field path, as
 /// returned by the read API. `raw` is the baseline-vs-candidate diff at this
 /// path, `noise` the baseline-vs-control diff; at least one is present.
@@ -110,24 +139,24 @@ pub struct SamplePage {
 pub trait DiffStore: Send + Sync {
     async fn append_diff(&self, entry: &DiffEntry) -> Result<(), StoreError>;
 
-    /// Add a batch of per-endpoint count *deltas* to the store, accumulating
-    /// into the existing totals (atomic add, not overwrite). Multiple riffy
-    /// instances sharing one backend therefore sum into the same totals instead
-    /// of clobbering each other. `last_updated` is set to the delta's value.
+    /// Add a batch of per-endpoint count *deltas* into the current time bucket
+    /// (atomic add, not overwrite). Buckets older than the retention window age
+    /// out, so reads reflect only recent traffic. Multiple riffy instances
+    /// sharing one backend sum into the same buckets instead of clobbering.
     async fn add_aggregation(&self, deltas: &[EndpointAggregation]) -> Result<(), StoreError>;
 
-    /// Read the latest aggregation snapshot for one endpoint, or `None` if the
-    /// endpoint has no snapshot yet. Read side of the query API — never the
+    /// Sum one endpoint's buckets over the retention window, or `None` when it
+    /// has no counts within the window. Read side of the query API — never the
     /// proxy hot path.
     async fn get_aggregation(
         &self,
         endpoint: &str,
     ) -> Result<Option<EndpointAggregation>, StoreError>;
 
-    /// List the latest aggregation snapshot for every recorded endpoint.
+    /// Windowed aggregation for every endpoint with recent activity.
     async fn list_aggregations(&self) -> Result<Vec<EndpointAggregation>, StoreError>;
 
-    /// Clear the stored aggregation counts for one endpoint (admin reset).
+    /// Clear all stored aggregation buckets for one endpoint (admin reset).
     /// Per-request samples are not purged — they are bounded by the stream cap
     /// and age out on their own; only the statistics are reset.
     async fn reset_aggregation(&self, endpoint: &str) -> Result<(), StoreError>;

@@ -16,6 +16,10 @@ upstream:
 storage:
   aggregation-interval: 1s
   stream-cap: 10000
+  # Aggregation counts age out past `window` and are bucketed at `bucket`
+  # resolution, so the regression verdict reflects recent traffic only.
+  window: 60m
+  bucket: 1m
   backend:
     type: in-memory
 

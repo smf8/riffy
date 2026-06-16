@@ -58,6 +58,8 @@ fn test_config() -> Riffy {
         storage: Storage {
             aggregation_interval: Duration::from_secs(1),
             stream_cap: 10_000,
+            window: Duration::from_secs(3600),
+            bucket: Duration::from_secs(60),
             backend: StorageBackend::InMemory,
         },
         server: Server {
