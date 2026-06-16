@@ -20,6 +20,7 @@ fn endpoint(pattern: &str, suppress: &[&str]) -> EndpointConfig {
         pattern: pattern.to_owned(),
         threshold: Default::default(),
         suppress_paths: suppress.iter().map(|s| s.to_string()).collect(),
+        sample_rate: 1.0,
     }
 }
 

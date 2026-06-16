@@ -55,6 +55,7 @@ fn test_config() -> Riffy {
                 absolute: 0.03,
             },
             suppress_paths: vec![],
+            sample_rate: 1.0,
         }],
         // The proxy integration test drives the in-memory store directly.
         storage: Storage {
@@ -96,6 +97,19 @@ async fn spawn_proxy(
     control: SocketAddr,
     candidate: SocketAddr,
 ) -> TestProxy {
+    spawn_proxy_with_config(baseline, control, candidate, test_config()).await
+}
+
+async fn spawn_proxy_with_config(
+    baseline: SocketAddr,
+    control: SocketAddr,
+    candidate: SocketAddr,
+    mut config: Riffy,
+) -> TestProxy {
+    config.upstream.baseline = baseline.to_string();
+    config.upstream.control = control.to_string();
+    config.upstream.candidate = candidate.to_string();
+
     let upstream = UpstreamClient::new(
         baseline.to_string(),
         control.to_string(),
@@ -106,7 +120,13 @@ async fn spawn_proxy(
     let (analysis_tx, analysis_rx) = riffy::pipeline::channel(1024);
     let collector = Arc::new(LiveCounters::new());
     let store = Arc::new(InMemoryDiffStore::new());
-    let matcher = Arc::new(EndpointMatcher::new(&["/api/v1/users/:id".to_owned()]));
+    let matcher = Arc::new(EndpointMatcher::new(
+        &config
+            .endpoints
+            .iter()
+            .map(|e| e.pattern.clone())
+            .collect::<Vec<_>>(),
+    ));
 
     Consumer::new(
         analysis_rx,
@@ -119,7 +139,7 @@ async fn spawn_proxy(
     .spawn();
 
     let state = AppState {
-        config: Arc::new(test_config()),
+        config: Arc::new(config),
         upstream: Arc::new(upstream),
         analysis_tx,
         matcher,
@@ -222,5 +242,35 @@ async fn mutating_methods_are_blocked() {
 
     assert_eq!(response.status(), 405);
     tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(proxy.store.entries().await.is_empty());
+}
+
+#[tokio::test]
+async fn sample_rate_zero_skips_fanout() {
+    // With sample_rate=0.0 every request is sampled out: the candidate/control
+    // fan-out never fires, so no diff entries are written even when the upstreams differ.
+    let baseline_body = json!({"name": "alice"});
+    let baseline = spawn_json_upstream(baseline_body.clone()).await;
+    let control = spawn_json_upstream(json!({"name": "alice"})).await;
+    let candidate = spawn_json_upstream(json!({"name": "bob"})).await;
+
+    let mut config = test_config();
+    config.endpoints[0].sample_rate = 0.0;
+
+    let proxy = spawn_proxy_with_config(baseline, control, candidate, config).await;
+
+    let response = http_client()
+        .get(format!("http://{}/api/v1/users/1", proxy.addr))
+        .send()
+        .await
+        .unwrap();
+
+    // Client still receives the baseline response.
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body, baseline_body);
+
+    // No analysis: no diff entries despite differing candidate.
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(proxy.store.entries().await.is_empty());
 }

@@ -90,6 +90,20 @@ pub async fn forward(
         return Ok(client_response.into_response());
     };
 
+    // Sampling: skip fan-out when this endpoint's sample_rate < 1.0 and the
+    // random draw falls outside the keep window. sample_rate=0.0 always skips;
+    // sample_rate=1.0 bypasses the RNG entirely.
+    let sample_rate = state
+        .config
+        .endpoints
+        .iter()
+        .find(|e| e.pattern == endpoint_key.as_ref())
+        .map(|e| e.sample_rate)
+        .unwrap_or(1.0);
+    if sample_rate < 1.0 && rand::random::<f64>() >= sample_rate {
+        return Ok(client_response.into_response());
+    }
+
     let upstream = state.upstream.clone();
     let analysis_tx = state.analysis_tx.clone();
     let method_clone = method.clone();

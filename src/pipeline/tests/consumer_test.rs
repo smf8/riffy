@@ -293,6 +293,7 @@ async fn suppressed_path_is_excluded_from_diffs() {
         pattern: "/api/v1/users/:id".to_owned(),
         threshold: Default::default(),
         suppress_paths: vec!["name".to_owned()],
+        sample_rate: 1.0,
     }];
 
     let store = run_consumer_with_endpoints(
@@ -316,6 +317,7 @@ async fn suppressed_prefix_removes_subtree() {
         pattern: "/api/v1/users/:id".to_owned(),
         threshold: Default::default(),
         suppress_paths: vec!["meta".to_owned()],
+        sample_rate: 1.0,
     }];
 
     let store = run_consumer_with_endpoints(
@@ -339,6 +341,7 @@ async fn unsuppressed_sibling_is_still_recorded() {
         pattern: "/api/v1/users/:id".to_owned(),
         threshold: Default::default(),
         suppress_paths: vec!["name".to_owned()],
+        sample_rate: 1.0,
     }];
 
     let store = run_consumer_with_endpoints(
@@ -366,6 +369,7 @@ async fn wildcard_suppress_path_filters_indexed_fields() {
         pattern: "/api/v1/users/:id".to_owned(),
         threshold: Default::default(),
         suppress_paths: vec!["items.*.id".to_owned()],
+        sample_rate: 1.0,
     }];
 
     let store = run_consumer_with_endpoints(

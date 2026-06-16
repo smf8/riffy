@@ -22,6 +22,7 @@ fn valid_config() -> Riffy {
                 absolute: 0.03,
             },
             suppress_paths: vec![],
+            sample_rate: 1.0,
         }],
         storage: Storage {
             aggregation_interval: Duration::from_secs(1),
@@ -133,5 +134,28 @@ fn sampling_rate_boundary_values_are_valid() {
     cfg.jaeger.sampling_rate = 0.0;
     assert!(cfg.validate().is_ok());
     cfg.jaeger.sampling_rate = 1.0;
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn endpoint_sample_rate_above_one_fails() {
+    let mut cfg = valid_config();
+    cfg.endpoints[0].sample_rate = 1.1;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn endpoint_sample_rate_below_zero_fails() {
+    let mut cfg = valid_config();
+    cfg.endpoints[0].sample_rate = -0.1;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn endpoint_sample_rate_boundary_values_are_valid() {
+    let mut cfg = valid_config();
+    cfg.endpoints[0].sample_rate = 0.0;
+    assert!(cfg.validate().is_ok());
+    cfg.endpoints[0].sample_rate = 1.0;
     assert!(cfg.validate().is_ok());
 }

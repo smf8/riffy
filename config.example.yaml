@@ -15,7 +15,7 @@ upstream:
   candidate: "http://localhost:9000"
   timeout: 30s
 
-# Each endpoint may carry its own thresholds and suppress_paths.
+# Each endpoint may carry its own thresholds, suppress_paths, and sample_rate.
 # Omit `threshold` for the diffy defaults (relative 20%, absolute 0.03%).
 #
 # suppress_paths: dot-separated JSON paths to exclude from diff analysis.
@@ -26,6 +26,11 @@ upstream:
 #     path depth must equal the pattern depth.
 #       "meta.*"     → suppresses meta.ts, meta.v  (direct children only)
 #       "items.*.id" → suppresses items.0.id, items.1.id, … (not items.0.name)
+#
+# sample_rate: fraction of requests to analyze (0.0–1.0, default 1.0).
+#   Sampled-out requests are still proxied (baseline only); candidate/control
+#   fan-out and analysis are skipped. Use this to reduce upstream load on
+#   high-traffic endpoints.
 endpoints:
   - pattern: "/api/v1/users/:id"
     threshold:
@@ -35,6 +40,7 @@ endpoints:
       - "updated_at"     # plain: suppresses updated_at and any descendants
       - "meta.*"         # glob:  suppresses all direct children of meta
       - "items.*.ts"     # glob:  suppresses the ts field in each items element
+    sample_rate: 0.5     # analyze 50% of requests
   - pattern: "/api/v1/orders/:order-id/items/:item_id"
   - pattern: "/api/v1/health"
 

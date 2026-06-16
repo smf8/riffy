@@ -101,6 +101,10 @@ fn default_absolute_threshold() -> f64 {
     0.03
 }
 
+fn default_sample_rate() -> f64 {
+    1.0
+}
+
 impl Default for Threshold {
     fn default() -> Self {
         Self {
@@ -123,6 +127,12 @@ pub struct EndpointConfig {
     #[garde(skip)]
     #[serde(default)]
     pub suppress_paths: Vec<String>,
+    /// Fraction of requests to analyze: 0.0 = none, 1.0 = all (default).
+    /// Sampled-out requests are still proxied (baseline only); the
+    /// candidate/control fan-out and analysis are skipped.
+    #[garde(range(min = 0.0, max = 1.0))]
+    #[serde(default = "default_sample_rate")]
+    pub sample_rate: f64,
 }
 
 /// Storage for diffs and aggregation snapshots. `aggregation-interval` and
