@@ -5,6 +5,7 @@ use std::time::Duration;
 use super::decode::decode_body;
 use super::AnalysisMessage;
 use crate::analysis::counters::LiveCounters;
+use crate::analysis::suppress::EndpointSuppressPaths;
 use crate::compare::flatten::{flatten_value, DiffType, FieldDiff, STATUS_FIELD};
 use crate::endpoint::EndpointMatcher;
 use crate::storage::{DiffEntry, DiffStore};
@@ -26,6 +27,7 @@ pub struct Consumer {
     collector: Arc<LiveCounters>,
     store: Arc<dyn DiffStore>,
     aggregation_interval: Duration,
+    suppress: Arc<EndpointSuppressPaths>,
 }
 
 impl Consumer {
@@ -35,6 +37,7 @@ impl Consumer {
         collector: Arc<LiveCounters>,
         store: Arc<dyn DiffStore>,
         aggregation_interval: Duration,
+        suppress: Arc<EndpointSuppressPaths>,
     ) -> Self {
         Self {
             rx,
@@ -42,6 +45,7 @@ impl Consumer {
             collector,
             store,
             aggregation_interval,
+            suppress,
         }
     }
 
@@ -87,8 +91,11 @@ impl Consumer {
         // Statuses are checked before bodies: a body is only compared when
         // its upstream answered with the same status as baseline. A different
         // status is itself the regression signal and is reported directly.
-        let raw_diffs = diff_against(&baseline, baseline_status, &msg.candidate_response).await;
-        let noise_diffs = diff_against(&baseline, baseline_status, &msg.control_response).await;
+        let mut raw_diffs = diff_against(&baseline, baseline_status, &msg.candidate_response).await;
+        let mut noise_diffs = diff_against(&baseline, baseline_status, &msg.control_response).await;
+
+        self.suppress.suppress(&endpoint, &mut raw_diffs);
+        self.suppress.suppress(&endpoint, &mut noise_diffs);
 
         self.collector.record(&endpoint, &raw_diffs, &noise_diffs);
 

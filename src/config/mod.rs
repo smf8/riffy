@@ -116,6 +116,11 @@ pub struct EndpointConfig {
     #[garde(dive)]
     #[serde(default)]
     pub threshold: Threshold,
+    /// Dot-separated JSON paths to exclude from diff analysis for this endpoint.
+    /// Subtree suppression: `"a.b"` also suppresses `"a.b.c"`, `"a.b.d.e"`, etc.
+    #[garde(skip)]
+    #[serde(default)]
+    pub suppress_paths: Vec<String>,
 }
 
 /// Storage for diffs and aggregation snapshots. `aggregation-interval` and

@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::analysis::counters::LiveCounters;
+use crate::analysis::suppress::EndpointSuppressPaths;
+use crate::config::EndpointConfig;
 use crate::endpoint::EndpointMatcher;
 use crate::pipeline::consumer::Consumer;
 use crate::pipeline::AnalysisMessage;
@@ -39,10 +41,18 @@ fn message(
 /// into the store. All count assertions therefore read the store, matching the
 /// "all reads go through the store" design.
 async fn run_consumer(messages: Vec<AnalysisMessage>) -> Arc<InMemoryDiffStore> {
+    run_consumer_with_endpoints(messages, vec![]).await
+}
+
+async fn run_consumer_with_endpoints(
+    messages: Vec<AnalysisMessage>,
+    endpoints: Vec<EndpointConfig>,
+) -> Arc<InMemoryDiffStore> {
     let (tx, rx) = crate::pipeline::channel(1024);
     let collector = Arc::new(LiveCounters::new());
     let store = Arc::new(InMemoryDiffStore::new());
     let matcher = Arc::new(EndpointMatcher::new(&["/api/v1/users/:id".to_owned()]));
+    let suppress = Arc::new(EndpointSuppressPaths::from_config(&endpoints));
 
     let handle = Consumer::new(
         rx,
@@ -50,6 +60,7 @@ async fn run_consumer(messages: Vec<AnalysisMessage>) -> Arc<InMemoryDiffStore> 
         collector,
         store.clone(),
         Duration::from_secs(3600),
+        suppress,
     )
     .spawn();
 
@@ -274,4 +285,108 @@ async fn unregistered_path_is_dropped() {
 
     assert!(store.entries().await.is_empty());
     assert!(store.aggregation("/other/route").await.is_none());
+}
+
+#[tokio::test]
+async fn suppressed_path_is_excluded_from_diffs() {
+    let endpoints = vec![crate::config::EndpointConfig {
+        pattern: "/api/v1/users/:id".to_owned(),
+        threshold: Default::default(),
+        suppress_paths: vec!["name".to_owned()],
+    }];
+
+    let store = run_consumer_with_endpoints(
+        vec![message(
+            "/api/v1/users/1",
+            r#"{"name": "alice", "score": 10}"#,
+            Some(r#"{"name": "bob", "score": 10}"#),
+            Some(r#"{"name": "alice", "score": 10}"#),
+        )],
+        endpoints,
+    )
+    .await;
+
+    // `name` is suppressed — only identical `score` remains, so no entry is stored.
+    assert!(store.entries().await.is_empty());
+}
+
+#[tokio::test]
+async fn suppressed_prefix_removes_subtree() {
+    let endpoints = vec![crate::config::EndpointConfig {
+        pattern: "/api/v1/users/:id".to_owned(),
+        threshold: Default::default(),
+        suppress_paths: vec!["meta".to_owned()],
+    }];
+
+    let store = run_consumer_with_endpoints(
+        vec![message(
+            "/api/v1/users/1",
+            r#"{"meta": {"ts": 1, "v": 2}, "id": 1}"#,
+            Some(r#"{"meta": {"ts": 9, "v": 9}, "id": 1}"#),
+            Some(r#"{"meta": {"ts": 1, "v": 2}, "id": 1}"#),
+        )],
+        endpoints,
+    )
+    .await;
+
+    // `meta.ts` and `meta.v` are both suppressed by the `meta` prefix — no entry.
+    assert!(store.entries().await.is_empty());
+}
+
+#[tokio::test]
+async fn unsuppressed_sibling_is_still_recorded() {
+    let endpoints = vec![crate::config::EndpointConfig {
+        pattern: "/api/v1/users/:id".to_owned(),
+        threshold: Default::default(),
+        suppress_paths: vec!["name".to_owned()],
+    }];
+
+    let store = run_consumer_with_endpoints(
+        vec![message(
+            "/api/v1/users/1",
+            r#"{"name": "alice", "score": 10}"#,
+            Some(r#"{"name": "bob", "score": 99}"#),
+            Some(r#"{"name": "alice", "score": 10}"#),
+        )],
+        endpoints,
+    )
+    .await;
+
+    let entries = store.entries().await;
+    assert_eq!(entries.len(), 1);
+    // `name` is suppressed, `score` is not.
+    assert!(!entries[0].raw_fields.contains_key("name"));
+    assert!(entries[0].raw_fields.contains_key("score"));
+}
+
+#[tokio::test]
+async fn wildcard_suppress_path_filters_indexed_fields() {
+    // items.*.id suppresses id within each array element but leaves name intact.
+    let endpoints = vec![crate::config::EndpointConfig {
+        pattern: "/api/v1/users/:id".to_owned(),
+        threshold: Default::default(),
+        suppress_paths: vec!["items.*.id".to_owned()],
+    }];
+
+    let store = run_consumer_with_endpoints(
+        vec![message(
+            "/api/v1/users/1",
+            // Baseline: id and name present
+            r#"{"items": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]}"#,
+            // Candidate: id differs AND name of first item differs
+            Some(r#"{"items": [{"id": 9, "name": "z"}, {"id": 9, "name": "b"}]}"#),
+            Some(r#"{"items": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]}"#),
+        )],
+        endpoints,
+    )
+    .await;
+
+    let entries = store.entries().await;
+    // items.0.name diff remains after suppression → one entry stored.
+    assert_eq!(entries.len(), 1);
+    // id fields are suppressed.
+    assert!(!entries[0].raw_fields.contains_key("items.0.id"));
+    assert!(!entries[0].raw_fields.contains_key("items.1.id"));
+    // name diff is still present.
+    assert!(entries[0].raw_fields.contains_key("items.0.name"));
 }

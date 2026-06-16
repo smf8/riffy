@@ -15,13 +15,26 @@ upstream:
   candidate: "http://localhost:9000"
   timeout: 30s
 
-# Each endpoint may carry its own thresholds; omit `threshold` for the diffy
-# defaults (relative 20%, absolute 0.03%).
+# Each endpoint may carry its own thresholds and suppress_paths.
+# Omit `threshold` for the diffy defaults (relative 20%, absolute 0.03%).
+#
+# suppress_paths: dot-separated JSON paths to exclude from diff analysis.
+#   Two match modes:
+#   - Plain path (no *): suppresses the path and all its descendants.
+#       "meta"       → suppresses meta, meta.ts, meta.nested.v, …
+#   - Glob path (contains *): * matches exactly one dot-separated segment;
+#     path depth must equal the pattern depth.
+#       "meta.*"     → suppresses meta.ts, meta.v  (direct children only)
+#       "items.*.id" → suppresses items.0.id, items.1.id, … (not items.0.name)
 endpoints:
   - pattern: "/api/v1/users/:id"
     threshold:
       relative: 20.0
       absolute: 0.03
+    suppress_paths:
+      - "updated_at"     # plain: suppresses updated_at and any descendants
+      - "meta.*"         # glob:  suppresses all direct children of meta
+      - "items.*.ts"     # glob:  suppresses the ts field in each items element
   - pattern: "/api/v1/orders/:order-id/items/:item_id"
   - pattern: "/api/v1/health"
 

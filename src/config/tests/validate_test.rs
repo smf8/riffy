@@ -21,6 +21,7 @@ fn valid_config() -> Riffy {
                 relative: 20.0,
                 absolute: 0.03,
             },
+            suppress_paths: vec![],
         }],
         storage: Storage {
             aggregation_interval: Duration::from_secs(1),

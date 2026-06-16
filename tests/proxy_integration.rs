@@ -10,6 +10,7 @@ use std::time::Duration;
 use axum::routing::any;
 use axum::{Json, Router};
 use riffy::analysis::counters::LiveCounters;
+use riffy::analysis::suppress::EndpointSuppressPaths;
 use riffy::config::{
     EndpointConfig, Logging, Metrics, Otlp, Pipeline, Proxy, Riffy, Server, Storage,
     StorageBackend, Threshold, Upstream,
@@ -53,6 +54,7 @@ fn test_config() -> Riffy {
                 relative: 20.0,
                 absolute: 0.03,
             },
+            suppress_paths: vec![],
         }],
         // The proxy integration test drives the in-memory store directly.
         storage: Storage {
@@ -111,6 +113,7 @@ async fn spawn_proxy(
         collector,
         store.clone(),
         Duration::from_secs(3600),
+        Arc::new(EndpointSuppressPaths::from_config(&[])),
     )
     .spawn();
 

@@ -6,6 +6,7 @@ use anyhow::Context;
 use clap::Parser;
 use riffy::analysis::classify::EndpointClassifiers;
 use riffy::analysis::counters::LiveCounters;
+use riffy::analysis::suppress::EndpointSuppressPaths;
 use riffy::config::{CliOverrides, StorageBackend};
 use riffy::endpoint::EndpointMatcher;
 use riffy::http::router::{admin_router, create_router, AdminState, AppState};
@@ -72,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
     let patterns: Vec<String> = cfg.endpoints.iter().map(|e| e.pattern.clone()).collect();
     let matcher = Arc::new(EndpointMatcher::new(&patterns));
     let classifiers = Arc::new(EndpointClassifiers::from_config(&cfg.endpoints));
+    let suppress = Arc::new(EndpointSuppressPaths::from_config(&cfg.endpoints));
 
     // The store is shared between the consumer (writer) and the admin query API
     // (reader). Both backends share the aggregation interval and stream cap.
@@ -104,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
         collector.clone(),
         store.clone(),
         aggregation_interval,
+        suppress,
     )
     .spawn();
 

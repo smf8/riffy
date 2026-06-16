@@ -58,7 +58,7 @@ fn embedded_defaults_fill_omitted_sections() {
 #[test]
 fn partial_storage_override_keeps_other_defaults() {
     // Override only one storage field; the rest must deep-merge from defaults.
-    let yaml = format!("{MINIMAL_YAML}\nstorage:\n  aggregation-interval: 9s\n");
+    let yaml = format!("{MINIMAL_YAML}\nstorage:\n  aggregation_interval: 9s\n");
     let cfg = parse(&yaml);
 
     assert_eq!(cfg.storage.aggregation_interval, Duration::from_secs(9));
@@ -79,8 +79,8 @@ endpoints:
       relative: 50.0
       absolute: 0.1
 storage:
-  aggregation-interval: 5s
-  stream-cap: 500
+  aggregation_interval: 5s
+  stream_cap: 500
   backend:
     type: redis
     uri: "redis://example:6379"
@@ -97,6 +97,28 @@ storage:
     // The explicit per-endpoint threshold overrides the diffy defaults.
     assert_eq!(cfg.endpoints[0].threshold.relative, 50.0);
     assert_eq!(cfg.endpoints[0].threshold.absolute, 0.1);
+}
+
+#[test]
+fn suppress_paths_parse_and_default_to_empty() {
+    let yaml = r#"
+upstream:
+  baseline: "http://localhost:9100"
+  control: "http://localhost:9200"
+  candidate: "http://localhost:9000"
+endpoints:
+  - pattern: "/a/:id"
+    suppress_paths:
+      - "meta.ts"
+      - "debug"
+  - pattern: "/b"
+"#;
+    let cfg = parse(yaml);
+    assert_eq!(
+        cfg.endpoints[0].suppress_paths,
+        vec!["meta.ts".to_owned(), "debug".to_owned()]
+    );
+    assert!(cfg.endpoints[1].suppress_paths.is_empty());
 }
 
 #[test]
