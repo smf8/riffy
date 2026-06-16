@@ -15,6 +15,7 @@ use serde_json::json;
 
 use crate::analysis::classify::EndpointClassifiers;
 use crate::analysis::counters::LiveCounters;
+use crate::compare::flatten::STATUS_FIELD;
 use crate::error::AppError;
 use crate::storage::{DiffStore, EndpointAggregation, FieldAggregation, SamplePage};
 
@@ -138,8 +139,16 @@ pub async fn diff_detail(
         raw_count,
         noise_count,
     };
-    let classifier = classifiers.for_endpoint(&query.endpoint);
-    let is_regression = classifier.is_regression(&counts, total);
+    let is_regression = if query.path == STATUS_FIELD {
+        // A status divergence is categorically a regression when the candidate
+        // diverges more than the control noise floor — independent of the
+        // percentage thresholds, which would dilute a rare but critical status.
+        counts.raw_count > counts.noise_count
+    } else {
+        classifiers
+            .for_endpoint(&query.endpoint)
+            .is_regression(&counts, total)
+    };
 
     Ok(Json(DiffDetail {
         endpoint: query.endpoint,

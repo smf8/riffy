@@ -113,7 +113,9 @@ async fn status_mismatch_alone_produces_entry() {
 
     let entries = store.entries().await;
     assert_eq!(entries.len(), 1);
-    assert!(entries[0].raw_fields.is_empty());
+    // The status divergence is recorded as the reserved :status pseudo-field.
+    assert!(entries[0].raw_fields.contains_key(":status"));
+    assert!(entries[0].noise_fields.is_empty());
     assert_eq!(entries[0].candidate_status, Some(500));
 }
 
@@ -133,12 +135,15 @@ async fn mismatched_status_skips_body_comparison() {
 
     let entries = store.entries().await;
     assert_eq!(entries.len(), 1);
-    assert!(entries[0].raw_fields.is_empty());
+    // Body not compared: only the status pseudo-field is recorded, not "a".
+    assert!(entries[0].raw_fields.contains_key(":status"));
+    assert!(!entries[0].raw_fields.contains_key("a"));
     assert_eq!(entries[0].candidate_status, Some(503));
-    // No field counters moved, only the endpoint total.
     let aggregation = store.aggregation("/api/v1/users/:id").await.unwrap();
     assert_eq!(aggregation.total, 1);
-    assert!(aggregation.fields.is_empty());
+    let status = aggregation.fields.get(":status").unwrap();
+    assert_eq!(status.raw_count, 1);
+    assert_eq!(status.noise_count, 0);
 }
 
 #[tokio::test]

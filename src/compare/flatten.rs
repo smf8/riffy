@@ -15,7 +15,14 @@ pub enum DiffType {
     SeqSize,
     Ordering,
     TypeMismatch,
+    /// HTTP status-code divergence at `STATUS_FIELD`; the body is not compared.
+    StatusMismatch,
 }
+
+/// Reserved field path for an HTTP status-code divergence (baseline vs another
+/// upstream). Not a real body path — the leading `:` cannot collide with a
+/// flattened JSON dot-path, so it is safe as a synthetic field key.
+pub const STATUS_FIELD: &str = ":status";
 
 /// A flattened representation of a single difference at a dot-separated path.
 /// `Deserialize` so the read API can reconstruct it from JSON persisted in the

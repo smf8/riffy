@@ -202,6 +202,40 @@ async fn diff_detail_returns_stats_and_paginated_samples() {
 }
 
 #[tokio::test]
+async fn status_field_flags_regression_below_thresholds() {
+    let store = Arc::new(InMemoryDiffStore::new());
+
+    // 1 status divergence in 100k requests: relative = 100% (> 20) but absolute
+    // = 0.001% (< 0.03), so the normal classifier would say "not a regression".
+    // The reserved :status field must flag it anyway (raw > noise).
+    let mut fields = HashMap::new();
+    fields.insert(":status".to_owned(), field(1, 0));
+    store
+        .add_aggregation(&[EndpointAggregation {
+            endpoint: "/api/v1/users/:id".to_owned(),
+            total: 100_000,
+            fields,
+            last_updated: Utc::now(),
+        }])
+        .await
+        .unwrap();
+
+    let addr = spawn_admin(store).await;
+    let client = http_client();
+
+    let body: Value = client
+        .get(format!("http://{addr}/diffs/detail"))
+        .query(&[("endpoint", "/api/v1/users/:id"), ("path", ":status")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["is_regression"], true);
+}
+
+#[tokio::test]
 async fn admin_serves_ui_assets() {
     let store = Arc::new(InMemoryDiffStore::new());
     let addr = spawn_admin(store).await;

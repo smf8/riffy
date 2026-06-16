@@ -5,7 +5,7 @@ use std::time::Duration;
 use super::decode::decode_body;
 use super::AnalysisMessage;
 use crate::analysis::counters::LiveCounters;
-use crate::compare::flatten::{flatten_value, FieldDiff};
+use crate::compare::flatten::{flatten_value, DiffType, FieldDiff, STATUS_FIELD};
 use crate::endpoint::EndpointMatcher;
 use crate::storage::{DiffEntry, DiffStore};
 use crate::upstream::client::UpstreamResponse;
@@ -95,11 +95,10 @@ impl Consumer {
         let candidate_status = msg.candidate_response.as_ref().map(|r| r.status);
         let control_status = msg.control_response.as_ref().map(|r| r.status);
 
-        let status_mismatch = candidate_status.is_some_and(|s| s != baseline_status)
-            || control_status.is_some_and(|s| s != baseline_status);
-
-        // Identical responses produce no entry — only counters (total) move.
-        if raw_diffs.is_empty() && noise_diffs.is_empty() && !status_mismatch {
+        // Identical responses produce no entry — only the endpoint total moves.
+        // A status mismatch surfaces as a `STATUS_FIELD` diff (see `diff_against`),
+        // so the emptiness check already covers it.
+        if raw_diffs.is_empty() && noise_diffs.is_empty() {
             return;
         }
 
@@ -156,7 +155,23 @@ async fn diff_against(
             Some(other) => flatten_value(baseline, &other),
             None => HashMap::new(),
         },
-        _ => HashMap::new(),
+        // Responded with a different status — the body is not compared (R23);
+        // the status divergence itself is the signal, recorded as a reserved
+        // pseudo-field so it is counted and queryable like any other diff.
+        Some(r) => {
+            let mut diffs = HashMap::new();
+            diffs.insert(
+                STATUS_FIELD.to_owned(),
+                FieldDiff {
+                    left: Some(serde_json::json!(baseline_status)),
+                    right: Some(serde_json::json!(r.status)),
+                    diff_type: DiffType::StatusMismatch,
+                },
+            );
+            diffs
+        }
+        // Upstream failed or was not called — not a status mismatch.
+        None => HashMap::new(),
     }
 }
 
