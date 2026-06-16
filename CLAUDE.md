@@ -110,13 +110,13 @@ For any **medium-to-large** new piece of logic:
 
 ## Git Conventions
 
-All commit messages must follow this format:
+All commit messages must follow this format (don't include the "this commit will" in the actual commit message):
 ```
-This commit will <description>
+This commit will <commit_message>
 ```
 Examples:
-- `This commit will add the diff engine for JSON response comparison`
-- `This commit will wire the Redis pipeline consumer task`
+- `Add the diff engine for JSON response comparison`
+- `Wire the Redis pipeline consumer task`
 
 ---
 
