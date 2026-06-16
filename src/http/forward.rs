@@ -3,12 +3,13 @@ use std::time::Instant;
 use crate::error::AppError;
 use crate::http::router::AppState;
 use crate::pipeline::AnalysisMessage;
-use crate::telemetry::metrics::{ResolvedEndpoint, UpstreamTimer};
+use crate::telemetry::metrics::{ResolvedEndpoint, UpstreamTimer, UNMATCHED_ENDPOINT};
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::Method;
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
+use std::sync::Arc;
 use tracing::Instrument;
 
 #[tracing::instrument(skip(state, endpoint, headers, body), fields(method = %method, path = %uri))]
@@ -36,8 +37,15 @@ pub async fn forward(
 
     let path = uri.path();
 
+    // Upstream-timer label: the matched template, or a single bucket for
+    // unmatched paths (baseline is still proxied for those).
+    let endpoint_label: Arc<str> = endpoint
+        .0
+        .clone()
+        .unwrap_or_else(|| Arc::from(UNMATCHED_ENDPOINT));
+
     // 1. Forward to baseline FIRST — blocking hot path, zero added latency
-    let baseline_timer = UpstreamTimer::start("baseline", endpoint.0.clone());
+    let baseline_timer = UpstreamTimer::start("baseline", endpoint_label.clone());
     let baseline_result = state
         .upstream
         .send(
@@ -75,16 +83,21 @@ pub async fn forward(
                 .unwrap()
         });
 
-    // 3. Fire candidate + control in background for analysis
+    // 3. Fire candidate + control in background for analysis — only for
+    //    registered endpoints. Unmatched paths are pure-proxied (baseline only):
+    //    no fan-out, no duplicate upstream load, no analysis.
+    let Some(endpoint_key) = endpoint.0.clone() else {
+        return Ok(client_response.into_response());
+    };
+
     let upstream = state.upstream.clone();
     let analysis_tx = state.analysis_tx.clone();
     let method_clone = method.clone();
     let path_owned = path.to_string();
     let path_and_query_owned = path_and_query.to_string();
     let headers_clone = headers.clone();
-    let endpoint_key = endpoint.0.clone();
 
-    let analysis_span = tracing::info_span!("analysis", endpoint = %path);
+    let analysis_span = tracing::info_span!("analysis", endpoint = %endpoint_key);
 
     tokio::spawn(
         async move {

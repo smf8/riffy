@@ -1,8 +1,9 @@
 //! Endpoint identification via path template matching.
 //!
 //! Config defines templates like `/api/v1/users/:id`. A request path resolves
-//! to the first matching template; unmatched paths fall back to the raw path
-//! with any query string stripped.
+//! to the first matching template, or `None` when no template matches —
+//! unmatched paths are proxied but excluded from analysis (keeps the store and
+//! the metric label cardinality bounded by the configured endpoint set).
 
 #[cfg(test)]
 mod tests;
@@ -65,9 +66,9 @@ impl EndpointMatcher {
         }
     }
 
-    /// Resolve a request path to its endpoint key: the first matching
-    /// configured template, or the raw path with the query string stripped.
-    pub fn resolve(&self, path: &str) -> String {
+    /// Resolve a request path to a configured endpoint template, or `None` when
+    /// no template matches. The query string is stripped before matching.
+    pub fn resolve(&self, path: &str) -> Option<String> {
         let path = path.split('?').next().unwrap_or(path);
         let segments: Vec<&str> = split_segments(path).collect();
 
@@ -75,6 +76,5 @@ impl EndpointMatcher {
             .iter()
             .find(|p| p.matches(&segments))
             .map(|p| p.raw.clone())
-            .unwrap_or_else(|| path.to_owned())
     }
 }

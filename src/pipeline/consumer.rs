@@ -69,7 +69,11 @@ impl Consumer {
     }
 
     async fn handle(&self, msg: AnalysisMessage) {
-        let endpoint = self.matcher.resolve(&msg.path);
+        let Some(endpoint) = self.matcher.resolve(&msg.path) else {
+            // Unregistered endpoint — the handler already skips fan-out for
+            // these; this is a safety net so analysis stays endpoint-bounded.
+            return;
+        };
         let baseline_status = msg.baseline_response.status;
 
         let Some(baseline) = parse_json_body(&msg.baseline_response).await else {

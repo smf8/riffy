@@ -9,9 +9,14 @@ use axum::response::Response;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
 /// Endpoint key resolved once by the metrics middleware and shared with the
-/// proxy handler through request extensions.
+/// proxy handler through request extensions. `None` means the path matched no
+/// configured endpoint template — proxied, but excluded from analysis.
 #[derive(Clone)]
-pub struct ResolvedEndpoint(pub Arc<str>);
+pub struct ResolvedEndpoint(pub Option<Arc<str>>);
+
+/// Metric label for requests whose path matched no configured endpoint
+/// template — bounds `endpoint` label cardinality (all such paths collapse here).
+pub const UNMATCHED_ENDPOINT: &str = "undefined";
 
 /// Label value recorded when a tracked future is dropped before completing
 /// (client disconnect, server shutdown, or panic unwind).
@@ -34,11 +39,14 @@ pub async fn render_metrics(State(handle): State<Option<PrometheusHandle>>) -> S
 /// future is dropped mid-flight. Metric calls are no-ops when no recorder is
 /// installed (metrics disabled).
 pub async fn track_proxy(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
-    let endpoint: Arc<str> = state.matcher.resolve(req.uri().path()).into();
+    let resolved: Option<Arc<str>> = state.matcher.resolve(req.uri().path()).map(Arc::from);
     req.extensions_mut()
-        .insert(ResolvedEndpoint(endpoint.clone()));
+        .insert(ResolvedEndpoint(resolved.clone()));
 
-    let guard = ProxyRequestGuard::start(req.method().to_string(), endpoint);
+    // Unmatched paths collapse to a single label value so cardinality stays
+    // bounded by the configured endpoint set.
+    let label = resolved.unwrap_or_else(|| Arc::from(UNMATCHED_ENDPOINT));
+    let guard = ProxyRequestGuard::start(req.method().to_string(), label);
     let response = next.run(req).await;
     guard.complete(response.status());
 

@@ -203,11 +203,17 @@ async fn final_flush_writes_aggregation_snapshot() {
 
 #[tokio::test]
 async fn non_json_baseline_is_skipped_entirely() {
-    let store = run_consumer(vec![message("/x", "<html>", Some(r#"{"a": 1}"#), None)]).await;
+    let store = run_consumer(vec![message(
+        "/api/v1/users/9",
+        "<html>",
+        Some(r#"{"a": 1}"#),
+        None,
+    )])
+    .await;
 
     assert!(store.entries().await.is_empty());
     // Never recorded, so nothing was flushed for this endpoint.
-    assert!(store.aggregation("/x").await.is_none());
+    assert!(store.aggregation("/api/v1/users/:id").await.is_none());
 }
 
 #[tokio::test]
@@ -221,7 +227,7 @@ async fn gzip_baseline_is_decompressed_and_analyzed() {
         .await
         .unwrap();
 
-    let mut msg = message("/x", "", Some(r#"{"a": 2}"#), None);
+    let mut msg = message("/api/v1/users/9", "", Some(r#"{"a": 2}"#), None);
     msg.baseline_response.body = Bytes::from(compressed);
     msg.baseline_response.headers.insert(
         axum::http::header::CONTENT_ENCODING,
@@ -237,7 +243,7 @@ async fn gzip_baseline_is_decompressed_and_analyzed() {
 
 #[tokio::test]
 async fn unsupported_encoding_on_baseline_is_skipped() {
-    let mut msg = message("/x", r#"{"a": 1}"#, Some(r#"{"a": 2}"#), None);
+    let mut msg = message("/api/v1/users/9", r#"{"a": 1}"#, Some(r#"{"a": 2}"#), None);
     msg.baseline_response.headers.insert(
         axum::http::header::CONTENT_ENCODING,
         "compress".parse().unwrap(),
@@ -246,11 +252,13 @@ async fn unsupported_encoding_on_baseline_is_skipped() {
     let store = run_consumer(vec![msg]).await;
 
     assert!(store.entries().await.is_empty());
-    assert!(store.aggregation("/x").await.is_none());
+    assert!(store.aggregation("/api/v1/users/:id").await.is_none());
 }
 
 #[tokio::test]
-async fn unmatched_path_uses_raw_path_as_endpoint() {
+async fn unregistered_path_is_dropped() {
+    // The consumer only knows /api/v1/users/:id; an unregistered path is
+    // dropped (not analyzed, not stored) so cardinality stays bounded.
     let store = run_consumer(vec![message(
         "/other/route?q=1",
         r#"{"a": 1}"#,
@@ -259,6 +267,6 @@ async fn unmatched_path_uses_raw_path_as_endpoint() {
     )])
     .await;
 
-    let entries = store.entries().await;
-    assert_eq!(entries[0].endpoint, "/other/route");
+    assert!(store.entries().await.is_empty());
+    assert!(store.aggregation("/other/route").await.is_none());
 }
