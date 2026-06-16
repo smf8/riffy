@@ -21,7 +21,7 @@ flowchart TD
     client(["Client"]) --> mw
 
     subgraph proxyserver ["Proxy server — axum on server.proxy-port (src/http/router.rs, R24/R33)"]
-        mw["track_proxy middleware<br/>resolve endpoint template once;<br/>drop-guard records count + duration<br/>exactly once — real status, or<br/>status=cancelled if dropped (R21)<br/>(src/telemetry/metrics.rs)"]
+        mw["track_proxy middleware<br/>resolve endpoint template once (unmatched → endpoint=undefined, R35);<br/>drop-guard records count + duration<br/>exactly once — real status, or<br/>status=cancelled if dropped (R21)<br/>(src/telemetry/metrics.rs)"]
         guard{"mutating method and<br/>allow-http-side-effects=false?<br/>(src/http/forward.rs)"}
         mw --> guard
     end
@@ -46,13 +46,13 @@ flowchart TD
 
     subgraph consumer ["Analysis consumer — single task (src/pipeline/consumer.rs)"]
         recv["recv AnalysisMessage"]
-        resolve["EndpointMatcher.resolve<br/>:param template match,<br/>else raw path, query stripped<br/>(src/endpoint/mod.rs)"]
+        resolve["EndpointMatcher.resolve → Option<br/>:param template match, query stripped;<br/>unregistered path → drop, not analyzed (R35)<br/>(src/endpoint/mod.rs)"]
         baselineparse["parse baseline body:<br/>decode_body — gzip / x-gzip / deflate(zlib) / br / zstd<br/>via async-compression (R20) — then JSON parse;<br/>unparseable → skip request<br/>(src/pipeline/decode.rs, consumer.rs)"]
         statuscheck{"per upstream:<br/>responded with same<br/>status as baseline? (R23)"}
         diff["parse body, then flatten_value:<br/>diff → flatten to dot-paths<br/>raw = baseline vs candidate<br/>noise = baseline vs control<br/>(src/compare/)"]
-        nodiff["body not compared —<br/>empty diff map; a status mismatch<br/>is itself the signal (R23)"]
+        nodiff[":status pseudo-field (StatusMismatch);<br/>body not compared — the status divergence<br/>is itself the signal (R23/R36)"]
         record["LiveCounters.record<br/>DashMap + AtomicU64 write buffer:<br/>endpoint total, per-field raw / noise<br/>(src/analysis/counters.rs)"]
-        decide{"any raw/noise diffs,<br/>or upstream status mismatch?"}
+        decide{"any raw/noise diffs?<br/>(incl. the :status field)"}
         entry["DiffEntry (R13)"]
         skip(["no stream entry —<br/>only counters moved"])
         recv --> resolve --> baselineparse --> statuscheck
@@ -72,7 +72,7 @@ flowchart TD
 
     subgraph store ["DiffStore trait (src/storage/mod.rs, R25) — RedisDiffStore (redis.rs) / InMemoryDiffStore, selected by storage.backend (default in-memory) (memory.rs, R29/R33)"]
         xadd[("XADD MAXLEN ~ riffy:diffs<br/>per-request diff entry;<br/>capped at storage.stream-cap (R33)")]
-        hset[("HINCRBY riffy:agg:{endpoint}<br/>add deltas: total + raw:{path}/noise:{path};<br/>atomic pipeline, sums across instances, one RTT (R32)")]
+        hset[("HINCRBY riffy:agg:{endpoint}:{bucket}<br/>add deltas into the current time bucket; TTL = window+bucket;<br/>+ endpoint index set; atomic, sums across instances (R32/R37)")]
     end
 ```
 
@@ -114,13 +114,16 @@ relative/absolute percentages are derived in `diff_detail` at read time. Each
 configured endpoint may carry its own thresholds, so the classifier is looked
 up per endpoint via `EndpointClassifiers` (held in `AdminState`), falling back
 to the diffy defaults for unmatched endpoints (R33); changing a threshold
-reclassifies everything instantly with no re-flush. Read methods on `DiffStore`
-(analysis-side only, never the hot path): `get_aggregation` (HGETALL one
-`riffy:agg:{endpoint}` hash, regrouping the flat `raw:{path}`/`noise:{path}`
-entries by path), `list_aggregations` (cursor SCAN `riffy:agg:*` + pipelined
-HGETALL), `recent_samples` (paged, newest-first XREVRANGE over `riffy:diffs`,
-filtered to one endpoint + field path, `offset`/`limit` paginated),
-`reset_aggregation` (DEL one `riffy:agg:{endpoint}` hash).
+reclassifies everything instantly with no re-flush. The reserved `:status`
+field (an HTTP status divergence, R36) bypasses the percentage thresholds — it
+is flagged whenever raw > noise. Read methods on `DiffStore` (analysis-side
+only, never the hot path) sum the **retention window** (R37): `get_aggregation`
+(pipelined HGETALL over the endpoint's recent bucket keys
+`riffy:agg:{endpoint}:{bucket}`, merged), `list_aggregations` (SMEMBERS the
+endpoint index set, then sum each), `recent_samples` (paged, newest-first
+XREVRANGE over `riffy:diffs`, filtered to one endpoint + field path,
+`offset`/`limit` paginated), `reset_aggregation` (SCAN+DEL the endpoint's bucket
+keys + SREM the index).
 
 | Query route | Response |
 |-------------|----------|
@@ -162,29 +165,33 @@ one per request that produced diffs or a status mismatch:
 
 | Field | Content |
 |-------|---------|
-| `endpoint` | resolved template (e.g. `/api/v1/users/:id`) or raw path |
+| `endpoint` | resolved template (e.g. `/api/v1/users/:id`); unregistered paths are not analyzed (R35) |
 | `timestamp` | RFC 3339 |
 | `raw_fields` / `noise_fields` | JSON: `{ "<dot.path>": { "left"?, "right"?, "diff_type" } }` |
 | `baseline_status` | always present |
 | `candidate_status` / `control_status` | omitted when that upstream failed |
 
 `diff_type` is one of `primitive`, `missing_field`, `extra_field`, `seq_size`,
-`ordering`, `type_mismatch` (`src/compare/flatten.rs`).
+`ordering`, `type_mismatch`, `status_mismatch` (`src/compare/flatten.rs`). A
+`status_mismatch` rides the reserved `:status` field path (R36).
 
-**Aggregation hash** (`riffy:agg:{endpoint}`), counts incremented with `HINCRBY`
-every `aggregation-interval` so concurrent instances sum into the same hash
-instead of overwriting (R32):
+**Aggregation buckets** (`riffy:agg:{endpoint}:{bucket}`, one hash per time
+bucket), counts incremented with `HINCRBY` so concurrent instances sum into the
+same bucket; each bucket has a TTL of `window + bucket` so old data ages out
+(R32/R37). An index set (`riffy:agg:__endpoints__`) tracks endpoints for
+listing. Reads sum the buckets within `storage.window`:
 
 | Field | Content |
 |-------|---------|
-| `total` | requests analyzed for this endpoint (cumulative) |
+| `total` | requests analyzed for this endpoint in the bucket |
 | `raw:{dot.path}` | baseline-vs-candidate diff count at that path |
 | `noise:{dot.path}` | baseline-vs-control diff count at that path |
-| `last_updated` | RFC 3339 (last buffer drain) |
+| `last_updated` | RFC 3339 (last write to the bucket) |
 
 Per-field counts are flat hash entries (not a JSON blob) so `HINCRBY` can target
 them atomically; `is_regression` and the relative/absolute percentages are
-derived at read time (R31), never stored.
+derived at read time (R31), never stored. The verdict therefore reflects only
+the most recent `storage.window` of traffic (R37).
 
 ## Invariants (do not regress)
 
