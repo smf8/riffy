@@ -30,6 +30,7 @@ async-compression = { version = "0.4", features = ["tokio", "gzip", "zlib", "bro
 config = { version = "0.15", default-features = false, features = ["yaml", "json"] }
 humantime-serde = "1"
 clap = { version = "4", features = ["derive"] }
+garde = { version = "0.22", features = ["derive"] }
 
 # Redis
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }

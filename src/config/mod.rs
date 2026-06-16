@@ -28,44 +28,51 @@ pub struct CliOverrides {
 /// see `default.yaml`.
 pub(crate) const DEFAULT_CONFIG: &str = include_str!("default.yaml");
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Riffy {
+    #[garde(dive)]
     pub proxy: Proxy,
+    #[garde(dive)]
     pub pipeline: Pipeline,
+    #[garde(dive)]
     pub upstream: Upstream,
-    /// Endpoints to analyze; each carries its own regression thresholds
-    /// (defaulting to the diffy values when omitted).
+    #[garde(dive)]
     pub endpoints: Vec<EndpointConfig>,
+    #[garde(dive)]
     pub storage: Storage,
+    #[garde(dive)]
     pub server: Server,
+    #[garde(dive)]
     pub logging: Logging,
+    #[garde(dive)]
     pub metrics: Metrics,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Proxy {
+    #[garde(skip)]
     pub allow_http_side_effects: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Pipeline {
-    /// Bounded capacity of the proxy → analysis-consumer channel. When the
-    /// consumer falls behind, new messages are dropped with a warning
-    /// (backpressure by shedding, never unbounded queueing).
+    #[garde(range(min = 1))]
     pub channel_capacity: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Upstream {
-    /// Upstream addresses; the scheme is derived from the address itself
-    /// (e.g. `https://host:port`), defaulting to `http://` when none is given.
+    #[garde(length(min = 1))]
     pub baseline: String,
+    #[garde(length(min = 1))]
     pub control: String,
+    #[garde(length(min = 1))]
     pub candidate: String,
+    #[garde(skip)]
     #[serde(with = "humantime_serde")]
     pub timeout: Duration,
 }
@@ -73,11 +80,13 @@ pub struct Upstream {
 /// Per-field regression thresholds (diffy's noise filter). Defaults are the
 /// diffy values: 20% relative, 0.03% absolute. These are per-endpoint, so they
 /// stay in code rather than `default.yaml`.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Threshold {
+    #[garde(range(min = 0.0))]
     #[serde(default = "default_relative_threshold")]
     pub relative: f64,
+    #[garde(range(min = 0.0))]
     #[serde(default = "default_absolute_threshold")]
     pub absolute: f64,
 }
@@ -99,11 +108,12 @@ impl Default for Threshold {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct EndpointConfig {
+    #[garde(prefix("/"))]
     pub pattern: String,
-    /// Per-endpoint regression thresholds; omitted → diffy defaults.
+    #[garde(dive)]
     #[serde(default)]
     pub threshold: Threshold,
 }
@@ -112,63 +122,77 @@ pub struct EndpointConfig {
 /// `stream-cap` are common to every backend (they govern flush cadence and
 /// sample retention regardless of where data lands); `backend` selects between
 /// Redis and the in-memory store.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Storage {
+    #[garde(skip)]
     #[serde(with = "humantime_serde")]
     pub aggregation_interval: Duration,
+    #[garde(range(min = 1))]
     pub stream_cap: usize,
     /// Read/retention window: aggregation counts older than this age out, so the
     /// regression verdict reflects only recent traffic.
+    #[garde(skip)]
     #[serde(with = "humantime_serde")]
     pub window: Duration,
     /// Time-bucket granularity within the window (counts are bucketed at this
     /// resolution).
+    #[garde(skip)]
     #[serde(with = "humantime_serde")]
     pub bucket: Duration,
+    #[garde(dive)]
     pub backend: StorageBackend,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, garde::Validate)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StorageBackend {
-    /// In-memory store (no persistence across restarts) — the default.
     InMemory,
-    /// Redis-backed store. Stream and aggregation keys are fixed constants
-    /// (`storage::DIFF_STREAM_KEY` / `storage::AGGREGATION_KEY_PREFIX`).
-    Redis { uri: String },
+    Redis {
+        #[garde(length(min = 1))]
+        uri: String,
+    },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Server {
+    #[garde(skip)]
     pub address: String,
+    #[garde(skip)]
     pub proxy_port: u16,
+    #[garde(skip)]
     pub admin_port: u16,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Logging {
+    #[garde(skip)]
     pub level: String,
     /// OTLP trace export (to a Jaeger collector). Off by default; the endpoint
     /// still points at a local Jaeger so it is ready to enable.
+    #[garde(dive)]
     pub otlp: Otlp,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Otlp {
+    #[garde(skip)]
     pub enabled: bool,
     /// OTLP/HTTP base endpoint of the collector (Jaeger's OTLP receiver on
     /// 4318). The `/v1/traces` path is appended by the exporter.
+    #[garde(skip)]
     pub endpoint: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Metrics {
+    #[garde(skip)]
     pub enabled: bool,
+    #[garde(skip)]
     pub port: u16,
 }
 
@@ -243,43 +267,12 @@ impl Riffy {
     pub fn validate(&self) -> anyhow::Result<()> {
         use anyhow::ensure;
 
-        for (role, host) in [
-            ("baseline", &self.upstream.baseline),
-            ("control", &self.upstream.control),
-            ("candidate", &self.upstream.candidate),
-        ] {
-            ensure!(!host.trim().is_empty(), "upstream.{role} must not be empty");
-        }
+        <Self as garde::Validate>::validate(self).context("invalid configuration")?;
 
-        for endpoint in &self.endpoints {
-            ensure!(
-                endpoint.pattern.starts_with('/'),
-                "endpoint pattern '{}' must start with '/'",
-                endpoint.pattern
-            );
-            ensure!(
-                endpoint.threshold.relative >= 0.0,
-                "endpoint '{}' threshold.relative must be >= 0",
-                endpoint.pattern
-            );
-            ensure!(
-                endpoint.threshold.absolute >= 0.0,
-                "endpoint '{}' threshold.absolute must be >= 0",
-                endpoint.pattern
-            );
-        }
-
+        // Cross-field checks that garde cannot express declaratively:
         ensure!(
             self.server.proxy_port != self.server.admin_port,
             "server.proxy-port and server.admin-port must differ"
-        );
-        ensure!(
-            self.pipeline.channel_capacity > 0,
-            "pipeline.channel-capacity must be > 0"
-        );
-        ensure!(
-            self.storage.stream_cap > 0,
-            "storage.stream-cap must be > 0"
         );
         ensure!(
             self.storage.bucket.as_secs() >= 1,
@@ -289,12 +282,6 @@ impl Riffy {
             self.storage.window >= self.storage.bucket,
             "storage.window must be >= storage.bucket"
         );
-        if let StorageBackend::Redis { uri } = &self.storage.backend {
-            ensure!(
-                !uri.trim().is_empty(),
-                "storage.backend.uri must not be empty"
-            );
-        }
 
         Ok(())
     }
