@@ -53,6 +53,8 @@ async fn main() -> anyhow::Result<()> {
     })?;
     let tracer_provider = telemetry::init_tracing(&cfg.logging)?;
 
+    tracing::debug!("cfg loaded : {:?}", cfg);
+
     tracing::info!(service = riffy::SERVICE_NAME, "starting riffy");
 
     // Upstream client

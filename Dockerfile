@@ -31,7 +31,7 @@ LABEL org.opencontainers.image.title="riffy" \
 
 COPY --from=builder /app/target/release/riffy /usr/local/bin/riffy
 
-# Config is read from the working directory (config.yaml) or RIFFY_* env
+# Config is read from the working directory (config.yaml) or RIFFY__* env
 # vars — mount config.yaml into /app; no config is baked into the image.
 #
 # OTLP trace export to Jaeger is opt-in. To enable it in a container, point the

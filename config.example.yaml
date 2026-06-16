@@ -1,12 +1,12 @@
 proxy:
-  allow-http-side-effects: false
+  allow_http_side_effects: false
 
 # Analysis pipeline tuning. Optional — omit to use the defaults shown.
 pipeline:
-  # Bounded capacity of the proxy → analysis-consumer channel. When the
+  # Bounded capacity of the proxy → analysis_consumer channel. When the
   # consumer falls behind, the newest message is dropped with a warning
   # (backpressure by shedding, never unbounded queueing).
-  channel-capacity: 1024
+  channel_capacity: 1024
 
 upstream:
   # The scheme is derived from the address; omit it to default to http://.
@@ -22,30 +22,30 @@ endpoints:
     threshold:
       relative: 20.0
       absolute: 0.03
-  - pattern: "/api/v1/orders/:order_id/items/:item_id"
+  - pattern: "/api/v1/orders/:order-id/items/:item_id"
   - pattern: "/api/v1/health"
 
-# Storage for diffs and aggregation snapshots. `aggregation-interval` and
-# `stream-cap` apply to every backend; `backend` chooses where data lands.
+# Storage for diffs and aggregation snapshots. `aggregation_interval` and
+# `stream_cap` apply to every backend; `backend` chooses where data lands.
 storage:
-  # How often the in-memory counter buffer is flushed (raw counts only) to the
-  # store. Short = near-current reads; the flush is cheap (one pipelined write).
-  aggregation-interval: 1s
-  # Max per-request diff samples kept in the diff stream; oldest are trimmed
-  # past this (Redis XADD MAXLEN ~, in-memory drops the front).
-  stream-cap: 10000
+  # How often the in_memory counter buffer is flushed (raw counts only) to the
+  # store. Short = near_current reads; the flush is cheap (one pipelined write).
+  aggregation_interval: 1s
+  # Max per_request diff samples kept in the diff stream; oldest are trimmed
+  # past this (Redis XADD MAXLEN ~, in_memory drops the front).
+  stream_cap: 10000
   backend:
-    # type: in-memory   # no persistence across restarts (default)
+    # type: in_memory   # no persistence across restarts (default)
     type: redis
     uri: "redis://localhost:6379"
 
 server:
   address: "0.0.0.0"
-  proxy-port: 7677
-  admin-port: 7678
+  proxy_port: 7677
+  admin_port: 7678
 
 logging:
-  level: info
+  level: debug
   # OTLP trace export to a Jaeger collector (its OTLP/HTTP receiver, port 4318).
   # Disabled by default; the endpoint already points at a local Jaeger.
   otlp:

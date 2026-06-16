@@ -11,7 +11,7 @@ make run                                    # or: cargo run -- --config config.y
 ```
 
 - Proxy: `:7677` · Admin UI + diff API: `:7678` · Metrics: `:9090`
-- Config is layered: embedded defaults → `config.yaml` (cwd) → `RIFFY_*` env vars → CLI flags.
+- Config is layered: embedded defaults → `config.yaml` (cwd) → `RIFFY__*` env vars → CLI flags.
 
 ## Develop
 

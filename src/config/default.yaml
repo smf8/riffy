@@ -1,32 +1,32 @@
 # Built-in configuration defaults, embedded into the binary via include_str!.
-# This is the base layer; config.example.yaml, config.yaml, RIFFY_* env vars,
+# This is the base layer; config.example.yaml, config.yaml, RIFFY__* env vars,
 # and CLI args all override it. Fields with no sensible default (the upstream
 # addresses and the endpoint list) are intentionally absent and must be
 # supplied by the user.
 
 proxy:
-  allow-http-side-effects: false
+  allow_http_side_effects: false
 
 pipeline:
-  channel-capacity: 1024
+  channel_capacity: 1024
 
 upstream:
   timeout: 30s
 
 storage:
-  aggregation-interval: 1s
-  stream-cap: 10000
+  aggregation_interval: 1s
+  stream_cap: 10000
   # Aggregation counts age out past `window` and are bucketed at `bucket`
   # resolution, so the regression verdict reflects recent traffic only.
   window: 60m
   bucket: 1m
   backend:
-    type: in-memory
+    type: in_memory
 
 server:
   address: "0.0.0.0"
-  proxy-port: 7677
-  admin-port: 7678
+  proxy_port: 7677
+  admin_port: 7678
 
 logging:
   level: info
