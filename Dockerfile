@@ -13,6 +13,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
+RUN apt-get update && apt-get install -y build-essential
 RUN cargo chef cook --release --locked --recipe-path recipe.json
 COPY . .
 # Release profile (Cargo.toml) handles LTO + symbol stripping.
