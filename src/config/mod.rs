@@ -165,13 +165,12 @@ pub struct Metrics {
 }
 
 pub fn load(cli: &CliOverrides) -> anyhow::Result<Riffy> {
-    // Layered, lowest → highest priority: embedded defaults, the example file,
-    // the config file (CLI `--config` path or `config` in the cwd), `RIFFY_`
-    // env vars (nested via a `__` separator, e.g. `RIFFY_SERVER__PROXY_PORT`),
-    // then the CLI value overrides.
-    let mut builder = Config::builder()
-        .add_source(File::from_str(DEFAULT_CONFIG, FileFormat::Yaml))
-        .add_source(File::new("config.example", FileFormat::Yaml).required(false));
+    // Layered, lowest → highest priority: embedded defaults, the config file
+    // (CLI `--config` path or `config` in the cwd), `RIFFY_` env vars (nested
+    // via a `__` separator, e.g. `RIFFY_SERVER__PROXY_PORT`), then the CLI value
+    // overrides. `config.example.yaml` is documentation only — not auto-loaded.
+    let mut builder =
+        Config::builder().add_source(File::from_str(DEFAULT_CONFIG, FileFormat::Yaml));
     builder = match &cli.config_path {
         Some(path) => builder.add_source(File::from(path.as_path()).required(true)),
         None => builder.add_source(File::new("config", FileFormat::Yaml).required(false)),

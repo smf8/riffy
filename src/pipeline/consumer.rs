@@ -157,6 +157,13 @@ async fn diff_against(
 }
 
 /// Decompress (when content-encoded) and JSON-parse a response body.
+//
+// NOTE (unbounded body size): the full upstream body is buffered upstream
+// (`client.rs`) and decoded + parsed here with no max-size guard, so a very
+// large analyzed response can spike memory on the analysis side. The baseline
+// body must be buffered regardless (the hot path returns it to the client), but
+// the candidate/control bodies analyzed here could be capped. Deferred — add a
+// configurable byte limit that skips analysis (and truncates samples) above it.
 async fn parse_json_body(response: &UpstreamResponse) -> Option<Value> {
     let body = decode_body(response).await?;
     match serde_json::from_slice(&body) {

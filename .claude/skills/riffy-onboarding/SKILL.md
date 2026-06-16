@@ -132,14 +132,17 @@ same thing either way.
   from `.Values.riffy` (the whole config surface; see schema below).
 - **(new, optional) `templates/riffy/admin-service.yaml`** — exposes the admin
   port for the UI (`/`) and metrics (`/metrics`); add Prometheus scrape
-  annotations or a ServiceMonitor if the chart uses one.
+  annotations or a ServiceMonitor if the chart uses one. **The admin surface is
+  unauthenticated and includes a destructive `DELETE /diffs` plus sample data
+  (possible PII) — keep it cluster-internal: ClusterIP only, never via Ingress/
+  LoadBalancer, and restrict with a NetworkPolicy.**
 
 ### values schema (everything is managed here)
 
 ```yaml
 riffy:
   enabled: false
-  image: { repository: ghcr.io/snapp/riffy, tag: "" }   # tag defaults to .Chart.AppVersion
+  image: { repository: ghcr.io/smf8/riffy, tag: "" }   # tag defaults to .Chart.AppVersion
   replicas: 1                 # sampling fraction = replicas / (replicas + <app>.replicas)
   proxyPort: 8080             # MUST equal the app Service targetPort (P)
   adminPort: 7678
