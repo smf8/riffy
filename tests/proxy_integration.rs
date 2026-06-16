@@ -12,7 +12,7 @@ use axum::{Json, Router};
 use riffy::analysis::counters::LiveCounters;
 use riffy::analysis::suppress::EndpointSuppressPaths;
 use riffy::config::{
-    EndpointConfig, Logging, Metrics, Otlp, Pipeline, Proxy, Riffy, Server, Storage,
+    EndpointConfig, Jaeger, Logging, Metrics, Pipeline, Proxy, Riffy, Server, Storage,
     StorageBackend, Threshold, Upstream,
 };
 use riffy::endpoint::EndpointMatcher;
@@ -71,10 +71,11 @@ fn test_config() -> Riffy {
         },
         logging: Logging {
             level: "info".to_owned(),
-            otlp: Otlp {
-                enabled: false,
-                endpoint: "http://localhost:4318".to_owned(),
-            },
+        },
+        jaeger: Jaeger {
+            enabled: false,
+            endpoint: "http://localhost:4318".to_owned(),
+            sampling_rate: 1.0,
         },
         metrics: Metrics {
             enabled: false,

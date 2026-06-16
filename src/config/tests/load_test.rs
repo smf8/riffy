@@ -44,8 +44,9 @@ fn embedded_defaults_fill_omitted_sections() {
     assert!(matches!(cfg.storage.backend, StorageBackend::InMemory));
     assert_eq!(cfg.upstream.timeout, Duration::from_secs(30));
     assert!(!cfg.proxy.allow_http_side_effects);
-    assert!(!cfg.logging.otlp.enabled);
-    assert_eq!(cfg.logging.otlp.endpoint, "http://localhost:4318");
+    assert!(!cfg.jaeger.enabled);
+    assert_eq!(cfg.jaeger.endpoint, "http://localhost:4318");
+    assert_eq!(cfg.jaeger.sampling_rate, 1.0);
 
     // Endpoint without an explicit threshold gets the diffy defaults.
     let endpoint = &cfg.endpoints[0];
@@ -97,6 +98,24 @@ storage:
     // The explicit per-endpoint threshold overrides the diffy defaults.
     assert_eq!(cfg.endpoints[0].threshold.relative, 50.0);
     assert_eq!(cfg.endpoints[0].threshold.absolute, 0.1);
+}
+
+#[test]
+fn jaeger_defaults_and_override() {
+    // Defaults from embedded config.
+    let cfg = parse(MINIMAL_YAML);
+    assert!(!cfg.jaeger.enabled);
+    assert_eq!(cfg.jaeger.endpoint, "http://localhost:4318");
+    assert_eq!(cfg.jaeger.sampling_rate, 1.0);
+
+    // Override sampling_rate and endpoint.
+    let yaml = format!(
+        "{MINIMAL_YAML}\njaeger:\n  enabled: true\n  endpoint: \"http://j:4318\"\n  sampling_rate: 0.1\n"
+    );
+    let cfg = parse(&yaml);
+    assert!(cfg.jaeger.enabled);
+    assert_eq!(cfg.jaeger.endpoint, "http://j:4318");
+    assert_eq!(cfg.jaeger.sampling_rate, 0.1);
 }
 
 #[test]

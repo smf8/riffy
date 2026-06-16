@@ -46,6 +46,8 @@ pub struct Riffy {
     #[garde(dive)]
     pub logging: Logging,
     #[garde(dive)]
+    pub jaeger: Jaeger,
+    #[garde(dive)]
     pub metrics: Metrics,
 }
 
@@ -175,21 +177,23 @@ pub struct Server {
 pub struct Logging {
     #[garde(skip)]
     pub level: String,
-    /// OTLP trace export (to a Jaeger collector). Off by default; the endpoint
-    /// still points at a local Jaeger so it is ready to enable.
-    #[garde(dive)]
-    pub otlp: Otlp,
 }
 
+/// Jaeger/OTLP trace export configuration (off by default).
 #[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
-pub struct Otlp {
+pub struct Jaeger {
     #[garde(skip)]
     pub enabled: bool,
-    /// OTLP/HTTP base endpoint of the collector (Jaeger's OTLP receiver on
-    /// 4318). The `/v1/traces` path is appended by the exporter.
+    /// OTLP/HTTP base endpoint of the Jaeger collector (port 4318).
+    /// The exporter appends `/v1/traces` automatically.
     #[garde(skip)]
     pub endpoint: String,
+    /// Fraction of traces to sample (0.0 = none, 1.0 = all).
+    /// Uses `TraceIdRatioBased` wrapped in `ParentBased`, so child spans
+    /// follow the parent's sampling decision.
+    #[garde(range(min = 0.0, max = 1.0))]
+    pub sampling_rate: f64,
 }
 
 #[derive(Debug, Deserialize, garde::Validate)]

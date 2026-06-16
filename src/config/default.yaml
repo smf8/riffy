@@ -30,9 +30,11 @@ server:
 
 logging:
   level: info
-  otlp:
-    enabled: false
-    endpoint: "http://localhost:4318"
+
+jaeger:
+  enabled: false
+  endpoint: "http://localhost:4318"
+  sampling_rate: 1.0
 
 metrics:
   enabled: true

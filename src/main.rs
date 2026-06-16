@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         candidate: cli.candidate,
         endpoints: cli.endpoints,
     })?;
-    let tracer_provider = telemetry::init_tracing(&cfg.logging)?;
+    let tracer_provider = telemetry::init_tracing(&cfg.logging, &cfg.jaeger)?;
 
     tracing::debug!("cfg loaded : {:?}", cfg);
 

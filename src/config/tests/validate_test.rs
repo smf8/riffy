@@ -39,10 +39,11 @@ fn valid_config() -> Riffy {
         },
         logging: Logging {
             level: "info".to_owned(),
-            otlp: Otlp {
-                enabled: false,
-                endpoint: "http://localhost:4318".to_owned(),
-            },
+        },
+        jaeger: Jaeger {
+            enabled: false,
+            endpoint: "http://localhost:4318".to_owned(),
+            sampling_rate: 1.0,
         },
         metrics: Metrics {
             enabled: true,
@@ -110,4 +111,27 @@ fn zero_stream_cap_fails() {
     let mut cfg = valid_config();
     cfg.storage.stream_cap = 0;
     assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn sampling_rate_above_one_fails() {
+    let mut cfg = valid_config();
+    cfg.jaeger.sampling_rate = 1.1;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn sampling_rate_below_zero_fails() {
+    let mut cfg = valid_config();
+    cfg.jaeger.sampling_rate = -0.1;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn sampling_rate_boundary_values_are_valid() {
+    let mut cfg = valid_config();
+    cfg.jaeger.sampling_rate = 0.0;
+    assert!(cfg.validate().is_ok());
+    cfg.jaeger.sampling_rate = 1.0;
+    assert!(cfg.validate().is_ok());
 }

@@ -59,11 +59,15 @@ server:
 
 logging:
   level: debug
-  # OTLP trace export to a Jaeger collector (its OTLP/HTTP receiver, port 4318).
-  # Disabled by default; the endpoint already points at a local Jaeger.
-  otlp:
-    enabled: false
-    endpoint: "http://localhost:4318"
+
+# Jaeger trace export via OTLP/HTTP. Disabled by default.
+# When enabled, spans are exported to the Jaeger collector's OTLP receiver (port 4318).
+jaeger:
+  enabled: false
+  endpoint: "http://localhost:4318"
+  # Fraction of traces to sample: 1.0 = all, 0.5 = half, 0.0 = none.
+  # Uses ParentBased(TraceIdRatioBased) — child spans follow the parent's decision.
+  sampling_rate: 1.0
 
 metrics:
   enabled: true
