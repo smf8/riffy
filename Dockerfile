@@ -26,7 +26,7 @@ FROM gcr.io/distroless/cc-debian12:nonroot
 
 LABEL org.opencontainers.image.title="riffy" \
       org.opencontainers.image.description="Reverse proxy with diffy-style statistical regression detection" \
-      org.opencontainers.image.source="https://github.com/snapp/riffy"
+      org.opencontainers.image.source="https://github.com/smf8/riffy"
 
 COPY --from=builder /app/target/release/riffy /usr/local/bin/riffy
 
