@@ -27,7 +27,6 @@ pub async fn forward(
     let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
     let endpoint_label: Arc<str> = endpoint
-        .0
         .clone()
         .unwrap_or_else(|| Arc::from(UNMATCHED_ENDPOINT));
 
@@ -68,16 +67,6 @@ pub async fn forward(
                 .unwrap()
         });
 
-    if !state.config.proxy.allow_http_side_effects {
-        match method {
-            Method::POST | Method::PUT | Method::PATCH | Method::DELETE => {
-                tracing::warn!(method = %method, path = path_and_query, "blocked mutating method");
-                return Ok(axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response());
-            }
-            _ => {}
-        }
-    }
-
     dispatch_analysis(
         &state,
         &endpoint,
@@ -107,9 +96,19 @@ struct Dispatch {
 }
 
 fn dispatch_analysis(state: &AppState, endpoint: &ResolvedEndpoint, req: Dispatch) {
-    let Some(endpoint_key) = endpoint.0.clone() else {
+    let Some(endpoint_key) = endpoint.clone() else {
         return;
     };
+
+    if !state.config.proxy.allow_http_side_effects {
+        match req.method {
+            Method::POST | Method::PUT | Method::PATCH | Method::DELETE => {
+                tracing::debug!(method = %req.method, "skipping fan-out for mutating method");
+                return;
+            }
+            _ => {}
+        }
+    }
 
     let ep_cfg = state
         .config

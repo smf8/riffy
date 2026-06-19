@@ -8,8 +8,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use metrics_exporter_prometheus::PrometheusHandle;
 
-#[derive(Clone)]
-pub struct ResolvedEndpoint(pub Option<Arc<str>>);
+pub type ResolvedEndpoint = Option<Arc<str>>;
 
 pub const UNMATCHED_ENDPOINT: &str = "undefined";
 
@@ -23,8 +22,7 @@ pub async fn endpoint_metric_middleware(
     next: Next,
 ) -> Response {
     let resolved: Option<Arc<str>> = state.matcher.resolve(req.uri().path()).map(Arc::from);
-    req.extensions_mut()
-        .insert(ResolvedEndpoint(resolved.clone()));
+    req.extensions_mut().insert(resolved.clone());
 
     // Unmatched paths collapse to a single label value to keep cardinality bounded by the configured endpoint set.
     let label = resolved.unwrap_or_else(|| Arc::from(UNMATCHED_ENDPOINT));

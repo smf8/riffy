@@ -1,7 +1,3 @@
-//! End-to-end test: three mock upstreams behind the riffy proxy, verifying
-//! the client always receives the baseline response and the analysis pipeline
-//! records diffs through the `DiffStore` boundary.
-
 use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -59,7 +55,6 @@ fn test_config() -> Riffy {
             capture_request_curl: false,
             store_credentials_header: false,
         }],
-        // The proxy integration test drives the in-memory store directly.
         storage: Storage {
             aggregation_interval: Duration::from_secs(1),
             stream_cap: 10_000,
@@ -92,8 +87,6 @@ struct TestProxy {
     store: Arc<InMemoryDiffStore>,
 }
 
-/// Boot the full stack — proxy router + analysis consumer — against the given
-/// upstream addresses, with an in-memory store standing in for Redis.
 async fn spawn_proxy(
     baseline: SocketAddr,
     control: SocketAddr,
@@ -154,13 +147,10 @@ async fn spawn_proxy_with_config(
     TestProxy { addr, store }
 }
 
-/// Test HTTP client that ignores HTTP_PROXY/HTTPS_PROXY from the environment
-/// so localhost servers are reached directly.
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder().no_proxy().build().unwrap()
 }
 
-/// Poll the store until at least one diff entry lands (the pipeline is async).
 async fn wait_for_entries(store: &InMemoryDiffStore) -> Vec<DiffEntry> {
     for _ in 0..200 {
         let entries = store.entries().await;
@@ -188,11 +178,9 @@ async fn client_gets_baseline_response_and_diffs_are_recorded() {
         .unwrap();
     assert_eq!(response.status(), 200);
 
-    // Client must always see the baseline response.
     let body: Value = response.json().await.unwrap();
     assert_eq!(body, baseline_body);
 
-    // The pipeline asynchronously records the candidate regression.
     let entries = wait_for_entries(&proxy.store).await;
     assert_eq!(entries.len(), 1);
 
@@ -220,37 +208,38 @@ async fn identical_upstreams_produce_no_diff_entries() {
         .unwrap();
     assert_eq!(response.status(), 200);
 
-    // Give the background pipeline a moment, then confirm nothing was stored.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(proxy.store.entries().await.is_empty());
 }
 
 #[tokio::test]
-async fn mutating_methods_are_blocked() {
-    let body = json!({"a": 1});
-    let baseline = spawn_json_upstream(body.clone()).await;
-    let control = spawn_json_upstream(body.clone()).await;
-    let candidate = spawn_json_upstream(body.clone()).await;
+async fn mutating_methods_skip_fanout_but_proxy_baseline() {
+    let baseline_body = json!({"a": 1});
+    let baseline = spawn_json_upstream(baseline_body.clone()).await;
+    let control = spawn_json_upstream(baseline_body.clone()).await;
+    let candidate = spawn_json_upstream(json!({"a": 2})).await;
 
     let proxy = spawn_proxy(baseline, control, candidate).await;
 
-    let client = http_client();
-    let response = client
+    let response = http_client()
         .post(format!("http://{}/api/v1/users/1", proxy.addr))
         .body("{}")
         .send()
         .await
         .unwrap();
 
-    assert_eq!(response.status(), 405);
+    // Baseline response is always returned — reverse proxy role is preserved.
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body, baseline_body);
+
+    // No fan-out to candidate/control, so no diff entries.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(proxy.store.entries().await.is_empty());
 }
 
 #[tokio::test]
 async fn sample_rate_zero_skips_fanout() {
-    // With sample_rate=0.0 every request is sampled out: the candidate/control
-    // fan-out never fires, so no diff entries are written even when the upstreams differ.
     let baseline_body = json!({"name": "alice"});
     let baseline = spawn_json_upstream(baseline_body.clone()).await;
     let control = spawn_json_upstream(json!({"name": "alice"})).await;
@@ -267,12 +256,10 @@ async fn sample_rate_zero_skips_fanout() {
         .await
         .unwrap();
 
-    // Client still receives the baseline response.
     assert_eq!(response.status(), 200);
     let body: Value = response.json().await.unwrap();
     assert_eq!(body, baseline_body);
 
-    // No analysis: no diff entries despite differing candidate.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(proxy.store.entries().await.is_empty());
 }
