@@ -52,6 +52,12 @@
     pre.curl { margin:.4rem 0 0; padding:.5rem .6rem; background:var(--panel); border:1px solid var(--line);
                border-radius:6px; white-space:pre-wrap; word-break:break-all; font-size:.78rem;
                font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+    textarea.suppress { width:100%; min-height:5rem; resize:vertical; margin:.2rem 0 .5rem;
+               background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px;
+               padding:.4rem .5rem; font:.8rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .suppress-box { margin-top:1.1rem; border-top:1px solid var(--line); padding-top:.6rem; }
+    .suppress-box .row { display:flex; gap:.4rem; align-items:center; }
+    .suppress-box .saved { color:var(--ok); }
   </style>
 </head>
 <body>
@@ -86,6 +92,19 @@
           </template>
         </ul>
         <p class="muted" x-show="selected && selected.paths.length === 0">No diffing fields.</p>
+
+        <div class="suppress-box">
+          <h3>Suppress rules</h3>
+          <p class="muted" style="margin:.1rem 0 .4rem">One path per line. Plain path hides
+            it and its descendants; <code>*</code> matches one segment. Applied at read time.</p>
+          <textarea class="suppress" x-model="suppressText" spellcheck="false"
+                    placeholder="meta&#10;items.*.ts"></textarea>
+          <div class="row">
+            <button @click="saveSuppress()">save rules</button>
+            <button class="reset" @click="clearSuppress()">clear</button>
+            <span class="saved muted" x-show="suppressSaved" x-cloak>saved ✓</span>
+          </div>
+        </div>
       </section>
 
       <section class="detail" x-show="detail" x-cloak>
@@ -178,6 +197,8 @@
         upstreams: {},
         target: 'candidate',
         openCurl: null,
+        suppressText: '',
+        suppressSaved: false,
 
         async init() { await this.loadEndpoints(); await this.loadUpstreams(); },
 
@@ -203,7 +224,62 @@
           } catch (e) { this.error = String(e); }
         },
 
-        select(ep) { this.selected = ep; this.path = null; this.detail = null; this.offset = 0; },
+        select(ep) {
+          this.selected = ep; this.path = null; this.detail = null; this.offset = 0;
+          this.loadSuppress(ep.endpoint);
+        },
+
+        async loadSuppress(endpoint) {
+          this.suppressSaved = false;
+          try {
+            const u = new URL('/suppress', location.origin);
+            u.searchParams.set('endpoint', endpoint);
+            const r = await fetch(u);
+            if (!r.ok) throw new Error('GET /suppress → ' + r.status);
+            this.suppressText = ((await r.json()).paths || []).join('\n');
+          } catch (e) { this.error = String(e); }
+        },
+
+        parsePaths() {
+          return this.suppressText.split('\n').map(s => s.trim()).filter(Boolean);
+        },
+
+        // Rules apply at read time, so refresh endpoints + the open detail to show
+        // the effect immediately.
+        async refreshAfterSuppress() {
+          await this.loadEndpoints();
+          if (this.selected && this.path) await this.loadDetail();
+        },
+
+        async saveSuppress() {
+          if (!this.selected) return;
+          this.error = ''; this.suppressSaved = false;
+          try {
+            const u = new URL('/suppress', location.origin);
+            u.searchParams.set('endpoint', this.selected.endpoint);
+            const r = await fetch(u, {
+              method: 'PUT',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ paths: this.parsePaths() }),
+            });
+            if (!r.ok) throw new Error('PUT /suppress → ' + r.status);
+            this.suppressSaved = true;
+            await this.refreshAfterSuppress();
+          } catch (e) { this.error = String(e); }
+        },
+
+        async clearSuppress() {
+          if (!this.selected) return;
+          this.error = ''; this.suppressSaved = false;
+          try {
+            const u = new URL('/suppress', location.origin);
+            u.searchParams.set('endpoint', this.selected.endpoint);
+            const r = await fetch(u, { method: 'DELETE' });
+            if (!r.ok) throw new Error('DELETE /suppress → ' + r.status);
+            this.suppressText = '';
+            await this.refreshAfterSuppress();
+          } catch (e) { this.error = String(e); }
+        },
 
         showDetail(path) { this.path = path; this.offset = 0; return this.loadDetail(); },
 

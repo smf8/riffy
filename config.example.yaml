@@ -65,15 +65,21 @@ endpoints:
   - pattern: "/api/v1/orders/:order-id/items/:item_id"
   - pattern: "/api/v1/health"
 
-# Storage for diffs and aggregation snapshots. `aggregation_interval` and
-# `stream_cap` apply to every backend; `backend` chooses where data lands.
+# Storage for raw samples. The producer only records the three upstreams'
+# responses here; diffing, suppression, and detection all run at read time.
+# `sample_cap`, `window`, and `max_body_bytes` apply to every backend; `backend`
+# chooses where data lands.
 storage:
-  # How often the in_memory counter buffer is flushed (raw counts only) to the
-  # store. Short = near_current reads; the flush is cheap (one pipelined write).
-  aggregation_interval: 1s
-  # Max per_request diff samples kept in the diff stream; oldest are trimmed
-  # past this (Redis XADD MAXLEN ~, in_memory drops the front).
-  stream_cap: 10000
+  # Max raw samples kept per endpoint; oldest are trimmed past this (Redis XADD
+  # MAXLEN ~ on riffy:samples:{endpoint}, in_memory drops the front).
+  sample_cap: 10000
+  # Samples older than this are ignored at read time, so the regression verdict
+  # reflects only recent traffic.
+  window: 60m
+  # Decoded upstream bodies larger than this (bytes) are not stored: a baseline
+  # over the cap skips the sample, candidate/control over it are stored without
+  # a body. Default 256 KiB.
+  max_body_bytes: 262144
   backend:
     # type: in_memory   # no persistence across restarts (default)
     type: redis

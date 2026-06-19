@@ -1,47 +1,34 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::curl::build_curl;
 use super::decode::decode_body;
 use super::AnalysisMessage;
-use crate::analysis::counters::LiveCounters;
-use crate::analysis::suppress::EndpointSuppressPaths;
-use crate::compare::flatten::{flatten_value, DiffType, FieldDiff, STATUS_FIELD};
 use crate::endpoint::EndpointMatcher;
-use crate::storage::{DiffEntry, DiffStore};
+use crate::storage::{RawSample, SampleStore};
 use crate::upstream::client::UpstreamResponse;
 use chrono::Utc;
-use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
 
 pub struct Consumer {
     rx: mpsc::Receiver<AnalysisMessage>,
     matcher: Arc<EndpointMatcher>,
-    collector: Arc<LiveCounters>,
-    store: Arc<dyn DiffStore>,
-    aggregation_interval: Duration,
-    suppress: Arc<EndpointSuppressPaths>,
+    store: Arc<dyn SampleStore>,
+    max_body_bytes: usize,
 }
 
 impl Consumer {
     pub fn new(
         rx: mpsc::Receiver<AnalysisMessage>,
         matcher: Arc<EndpointMatcher>,
-        collector: Arc<LiveCounters>,
-        store: Arc<dyn DiffStore>,
-        aggregation_interval: Duration,
-        suppress: Arc<EndpointSuppressPaths>,
+        store: Arc<dyn SampleStore>,
+        max_body_bytes: usize,
     ) -> Self {
         Self {
             rx,
             matcher,
-            collector,
             store,
-            aggregation_interval,
-            suppress,
+            max_body_bytes,
         }
     }
 
@@ -50,133 +37,94 @@ impl Consumer {
     }
 
     async fn run(mut self) {
-        let mut ticker = tokio::time::interval(self.aggregation_interval);
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        loop {
-            tokio::select! {
-                maybe_msg = self.rx.recv() => match maybe_msg {
-                    Some(msg) => self.handle(msg).await,
-                    None => break,
-                },
-                _ = ticker.tick() => self.flush_aggregation().await,
-            }
+        while let Some(msg) = self.rx.recv().await {
+            self.handle(msg).await;
         }
-
-        self.flush_aggregation().await;
         tracing::info!("analysis consumer stopped");
     }
 
     async fn handle(&self, msg: AnalysisMessage) {
         let Some(endpoint) = self.matcher.resolve(&msg.path) else {
             // Safety net: the proxy handler already skips fan-out for unregistered
-            // endpoints, but this keeps analysis bounded to configured endpoints.
+            // endpoints, but this keeps sampling bounded to configured endpoints.
             return;
         };
         let baseline_status = msg.baseline_response.status;
 
-        let Some(baseline) = parse_json_body(&msg.baseline_response).await else {
+        // The baseline body must be readable JSON within the size cap, or the
+        // sample carries nothing to diff later — skip it entirely (as before).
+        let Some(baseline_body) =
+            decoded_json_text(&msg.baseline_response, self.max_body_bytes).await
+        else {
             tracing::warn!(
                 endpoint = %endpoint,
-                "skipping analysis: baseline response body is not readable json"
+                "skipping sample: baseline body is not storable json (non-json or over size cap)"
             );
             return;
         };
 
-        // Statuses are checked before bodies: a body is only compared when its
-        // upstream answered with the same status as baseline. A different status
-        // is itself the regression signal and is reported via STATUS_FIELD.
-        let mut raw_diffs = diff_against(&baseline, baseline_status, &msg.candidate_response).await;
-        let mut noise_diffs = diff_against(&baseline, baseline_status, &msg.control_response).await;
-
-        self.suppress.suppress(&endpoint, &mut raw_diffs);
-        self.suppress.suppress(&endpoint, &mut noise_diffs);
-
-        self.collector.record(&endpoint, &raw_diffs, &noise_diffs);
-
-        let candidate_status = msg.candidate_response.as_ref().map(|r| r.status);
-        let control_status = msg.control_response.as_ref().map(|r| r.status);
-
-        // Identical responses produce no entry. A status mismatch surfaces as a
-        // STATUS_FIELD diff (see diff_against), so this emptiness check covers it.
-        if raw_diffs.is_empty() && noise_diffs.is_empty() {
-            return;
-        }
-
-        let entry = DiffEntry {
-            endpoint,
-            timestamp: Utc::now(),
-            raw_fields: raw_diffs,
-            noise_fields: noise_diffs,
+        let (candidate_status, candidate_body) = upstream_body(
+            &msg.candidate_response,
             baseline_status,
+            self.max_body_bytes,
+        )
+        .await;
+        let (control_status, control_body) =
+            upstream_body(&msg.control_response, baseline_status, self.max_body_bytes).await;
+
+        let sample = RawSample {
+            endpoint: endpoint.clone(),
+            timestamp: Utc::now(),
+            baseline_status,
+            baseline_body,
             candidate_status,
+            candidate_body,
             control_status,
+            control_body,
             request_curl: msg.request.as_ref().map(build_curl),
         };
 
-        if let Err(e) = self.store.append_diff(&entry).await {
-            tracing::warn!(error = %e, "failed to append diff entry");
-        }
-
-        crate::pipeline::metrics::record_diff_published(
-            &entry.endpoint,
-            entry.raw_fields.len(),
-            entry.noise_fields.len(),
-            msg.received_at.elapsed(),
-        );
-    }
-
-    async fn flush_aggregation(&self) {
-        let deltas = self.collector.drain();
-        if deltas.is_empty() {
+        if let Err(e) = self.store.append_sample(&sample).await {
+            tracing::warn!(error = %e, "failed to append raw sample");
             return;
         }
 
-        if let Err(e) = self.store.add_aggregation(&deltas).await {
-            tracing::warn!(error = %e, "failed to add aggregation; restoring counters for retry");
-            self.collector.restore(&deltas);
-        }
+        crate::pipeline::metrics::record_sample_stored(&endpoint, msg.received_at.elapsed());
     }
 }
 
-async fn diff_against(
-    baseline: &Value,
-    baseline_status: u16,
+/// Bodies are only stored for an upstream that answered baseline's status — those
+/// are exactly the cases the read-time diff compares. A different status is the
+/// signal itself (recorded at read time), so its body is not stored; a failed
+/// upstream yields `(None, None)`.
+async fn upstream_body(
     response: &Option<UpstreamResponse>,
-) -> HashMap<String, FieldDiff> {
+    baseline_status: u16,
+    max_body_bytes: usize,
+) -> (Option<u16>, Option<String>) {
     match response {
-        Some(r) if r.status == baseline_status => match parse_json_body(r).await {
-            Some(other) => flatten_value(baseline, &other),
-            None => HashMap::new(),
-        },
-        // Status divergence: skip body comparison; the status difference itself is
-        // the signal, recorded as a pseudo-field so it counts and queries like any diff.
-        Some(r) => {
-            let mut diffs = HashMap::new();
-            diffs.insert(
-                STATUS_FIELD.to_owned(),
-                FieldDiff {
-                    left: Some(serde_json::json!(baseline_status)),
-                    right: Some(serde_json::json!(r.status)),
-                    diff_type: DiffType::StatusMismatch,
-                },
-            );
-            diffs
+        None => (None, None),
+        Some(r) if r.status == baseline_status => {
+            (Some(r.status), decoded_json_text(r, max_body_bytes).await)
         }
-        None => HashMap::new(),
+        Some(r) => (Some(r.status), None),
     }
 }
 
-// NOTE: the full upstream body is buffered with no max-size guard, so a very
-// large analyzed response can spike memory on the analysis side. Deferred —
-// add a configurable byte limit that skips analysis above it.
-async fn parse_json_body(response: &UpstreamResponse) -> Option<Value> {
-    let body = decode_body(response).await?;
-    match serde_json::from_slice(&body) {
-        Ok(value) => Some(value),
-        Err(e) => {
-            tracing::debug!(error = %e, "skipping non-json body in analysis");
-            None
-        }
+async fn decoded_json_text(response: &UpstreamResponse, max_body_bytes: usize) -> Option<String> {
+    let decoded = decode_body(response).await?;
+    if decoded.len() > max_body_bytes {
+        tracing::debug!(
+            len = decoded.len(),
+            max = max_body_bytes,
+            "skipping body over size cap"
+        );
+        return None;
     }
+    if serde_json::from_slice::<serde::de::IgnoredAny>(&decoded).is_err() {
+        tracing::debug!("skipping non-json body");
+        return None;
+    }
+    // Validated as JSON above, so the bytes are valid UTF-8.
+    String::from_utf8(decoded.into_owned()).ok()
 }

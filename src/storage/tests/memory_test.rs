@@ -1,242 +1,84 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::compare::flatten::{DiffType, FieldDiff};
-use crate::storage::{
-    DiffEntry, DiffStore, EndpointAggregation, FieldAggregation, InMemoryDiffStore,
-};
-use chrono::Utc;
-use serde_json::json;
+use crate::storage::{InMemorySampleStore, RawSample, SampleStore};
+use chrono::{DateTime, Utc};
 
-fn flat(left: &str, right: &str) -> FieldDiff {
-    FieldDiff {
-        left: Some(json!(left)),
-        right: Some(json!(right)),
-        diff_type: DiffType::Primitive,
-    }
-}
-
-/// A diff entry whose raw diff is at `raw_path` (if given).
-fn entry(endpoint: &str, raw_path: Option<&str>, left: &str, right: &str) -> DiffEntry {
-    let mut raw_fields = HashMap::new();
-    if let Some(path) = raw_path {
-        raw_fields.insert(path.to_owned(), flat(left, right));
-    }
-    DiffEntry {
+fn sample_at(endpoint: &str, tag: &str, timestamp: DateTime<Utc>) -> RawSample {
+    RawSample {
         endpoint: endpoint.to_owned(),
-        timestamp: Utc::now(),
-        raw_fields,
-        noise_fields: HashMap::new(),
+        timestamp,
         baseline_status: 200,
+        baseline_body: format!(r#"{{"v":"{tag}"}}"#),
         candidate_status: Some(200),
+        candidate_body: Some(format!(r#"{{"v":"{tag}-c"}}"#)),
         control_status: Some(200),
+        control_body: Some(format!(r#"{{"v":"{tag}"}}"#)),
         request_curl: None,
     }
 }
 
-#[tokio::test]
-async fn get_and_list_aggregations() {
-    let store = InMemoryDiffStore::new();
-
-    let mut fields = HashMap::new();
-    fields.insert(
-        "user.name".to_owned(),
-        FieldAggregation {
-            raw_count: 5,
-            noise_count: 1,
-        },
-    );
-    store
-        .add_aggregation(&[
-            EndpointAggregation {
-                endpoint: "/api/v1/users/:id".to_owned(),
-                total: 10,
-                fields,
-                last_updated: Utc::now(),
-            },
-            EndpointAggregation {
-                endpoint: "/api/v1/health".to_owned(),
-                total: 3,
-                fields: HashMap::new(),
-                last_updated: Utc::now(),
-            },
-        ])
-        .await
-        .unwrap();
-
-    let got = store
-        .get_aggregation("/api/v1/users/:id")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(got.total, 10);
-    assert_eq!(got.fields.len(), 1);
-
-    assert!(store.get_aggregation("/missing").await.unwrap().is_none());
-
-    let all = store.list_aggregations().await.unwrap();
-    assert_eq!(all.len(), 2);
+fn sample(endpoint: &str, tag: &str) -> RawSample {
+    sample_at(endpoint, tag, Utc::now())
 }
 
 #[tokio::test]
-async fn add_aggregation_accumulates_rather_than_overwrites() {
-    let store = InMemoryDiffStore::new();
-
-    let delta = |total: u64, raw: u64, noise: u64| {
-        let mut fields = HashMap::new();
-        fields.insert(
-            "user.name".to_owned(),
-            FieldAggregation {
-                raw_count: raw,
-                noise_count: noise,
-            },
-        );
-        vec![EndpointAggregation {
-            endpoint: "/e".to_owned(),
-            total,
-            fields,
-            last_updated: Utc::now(),
-        }]
-    };
-
-    store.add_aggregation(&delta(10, 4, 1)).await.unwrap();
-    store.add_aggregation(&delta(5, 2, 3)).await.unwrap();
-
-    // Two flushes must sum, not clobber — this is what lets multiple instances
-    // share one backend without losing each other's counts.
-    let got = store.get_aggregation("/e").await.unwrap().unwrap();
-    assert_eq!(got.total, 15);
-    let field = got.fields.get("user.name").unwrap();
-    assert_eq!(field.raw_count, 6);
-    assert_eq!(field.noise_count, 4);
-}
-
-#[tokio::test]
-async fn recent_samples_paginate_newest_first() {
-    let store = InMemoryDiffStore::new();
-
-    // Five matching entries (l0..l4) plus noise that must be excluded.
-    for i in 0..5 {
-        store
-            .append_diff(&entry("/e", Some("x"), &format!("l{i}"), &format!("r{i}")))
-            .await
-            .unwrap();
-    }
-    store
-        .append_diff(&entry("/e", Some("y"), "a", "b")) // wrong path
-        .await
-        .unwrap();
-    store
-        .append_diff(&entry("/other", Some("x"), "a", "b")) // wrong endpoint
-        .await
-        .unwrap();
-
-    // First page: newest first, more available.
-    let page = store.recent_samples("/e", "x", 2, 0).await.unwrap();
-    assert_eq!(page.items.len(), 2);
-    assert!(page.has_more);
-    assert_eq!(page.items[0].raw.as_ref().unwrap().right, Some(json!("r4")));
-    assert_eq!(page.items[1].raw.as_ref().unwrap().right, Some(json!("r3")));
-
-    // Last page: one item, no more.
-    let last = store.recent_samples("/e", "x", 2, 4).await.unwrap();
-    assert_eq!(last.items.len(), 1);
-    assert!(!last.has_more);
-    assert_eq!(last.items[0].raw.as_ref().unwrap().right, Some(json!("r0")));
-
-    // Unknown path: empty page.
-    let empty = store.recent_samples("/e", "missing", 10, 0).await.unwrap();
-    assert!(empty.items.is_empty());
-    assert!(!empty.has_more);
-}
-
-#[tokio::test]
-async fn recent_samples_carry_request_curl() {
-    let store = InMemoryDiffStore::new();
-
-    let mut with_curl = entry("/e", Some("x"), "l", "r");
-    with_curl.request_curl = Some("curl -X GET '$RIFFY_TARGET/x'".to_owned());
-    store.append_diff(&with_curl).await.unwrap();
-
-    // An entry captured without a curl carries None.
-    store
-        .append_diff(&entry("/e", Some("x"), "l2", "r2"))
-        .await
-        .unwrap();
-
-    let page = store.recent_samples("/e", "x", 10, 0).await.unwrap();
-    assert_eq!(page.items.len(), 2);
-    // Newest first: the no-curl entry, then the one with the curl.
-    assert_eq!(page.items[0].request_curl, None);
-    assert_eq!(
-        page.items[1].request_curl.as_deref(),
-        Some("curl -X GET '$RIFFY_TARGET/x'")
-    );
-}
-
-#[tokio::test]
-async fn append_diff_trims_oldest_past_cap() {
-    let store = InMemoryDiffStore::with_capacity(2);
-
+async fn round_trip_newest_first() {
+    let store = InMemorySampleStore::new();
     for i in 0..3 {
         store
-            .append_diff(&entry("/e", Some("x"), &format!("l{i}"), &format!("r{i}")))
+            .append_sample(&sample("/e", &format!("s{i}")))
             .await
             .unwrap();
     }
 
-    // Only the two newest survive; the oldest (l0) was trimmed from the front.
-    let entries = store.entries().await;
-    assert_eq!(entries.len(), 2);
-    assert_eq!(
-        entries[0].raw_fields.get("x").unwrap().left,
-        Some(json!("l1"))
-    );
-    assert_eq!(
-        entries[1].raw_fields.get("x").unwrap().left,
-        Some(json!("l2"))
-    );
-}
-
-fn total_delta(endpoint: &str, total: u64) -> Vec<EndpointAggregation> {
-    vec![EndpointAggregation {
-        endpoint: endpoint.to_owned(),
-        total,
-        fields: HashMap::new(),
-        last_updated: Utc::now(),
-    }]
+    let got = store.fetch_samples("/e").await.unwrap();
+    assert_eq!(got.len(), 3);
+    assert_eq!(got[0].baseline_body, r#"{"v":"s2"}"#);
+    assert_eq!(got[2].baseline_body, r#"{"v":"s0"}"#);
+    assert_eq!(got[0].candidate_body.as_deref(), Some(r#"{"v":"s2-c"}"#));
 }
 
 #[tokio::test]
-async fn windowed_aggregation_sums_recent_buckets() {
-    // 1s buckets, 10s window: two adds ~1.1s apart land in different buckets
-    // but both within the window, so reads sum them.
-    let store = InMemoryDiffStore::with_retention(
-        usize::MAX,
-        Duration::from_secs(1),
-        Duration::from_secs(10),
-    );
+async fn list_and_delete_endpoints() {
+    let store = InMemorySampleStore::new();
+    store.append_sample(&sample("/a", "x")).await.unwrap();
+    store.append_sample(&sample("/b", "y")).await.unwrap();
 
-    store.add_aggregation(&total_delta("/e", 3)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    store.add_aggregation(&total_delta("/e", 4)).await.unwrap();
+    let mut endpoints = store.list_endpoints().await.unwrap();
+    endpoints.sort();
+    assert_eq!(endpoints, vec!["/a".to_owned(), "/b".to_owned()]);
 
-    let agg = store.get_aggregation("/e").await.unwrap().unwrap();
-    assert_eq!(agg.total, 7);
+    store.delete_endpoint("/a").await.unwrap();
+    assert_eq!(store.list_endpoints().await.unwrap(), vec!["/b".to_owned()]);
+    assert!(store.fetch_samples("/a").await.unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn aggregation_ages_out_of_the_window() {
-    // 1s buckets, 1s window: a count is visible now, gone once the window passes.
-    let store = InMemoryDiffStore::with_retention(
-        usize::MAX,
-        Duration::from_secs(1),
-        Duration::from_secs(1),
-    );
+async fn cap_trims_oldest_per_endpoint() {
+    let store = InMemorySampleStore::with_capacity(2);
+    for i in 0..3 {
+        store
+            .append_sample(&sample("/e", &format!("s{i}")))
+            .await
+            .unwrap();
+    }
+    let got = store.fetch_samples("/e").await.unwrap();
+    assert_eq!(got.len(), 2);
+    // Newest-first: s2 then s1; s0 was trimmed.
+    assert_eq!(got[0].baseline_body, r#"{"v":"s2"}"#);
+    assert_eq!(got[1].baseline_body, r#"{"v":"s1"}"#);
+}
 
-    store.add_aggregation(&total_delta("/e", 5)).await.unwrap();
-    assert!(store.get_aggregation("/e").await.unwrap().is_some());
+#[tokio::test]
+async fn samples_outside_window_are_filtered() {
+    let store = InMemorySampleStore::with_retention(usize::MAX, Duration::from_secs(60));
 
-    tokio::time::sleep(Duration::from_millis(2100)).await;
-    assert!(store.get_aggregation("/e").await.unwrap().is_none());
+    let old = sample_at("/e", "old", Utc::now() - chrono::Duration::seconds(120));
+    let fresh = sample_at("/e", "fresh", Utc::now());
+    store.append_sample(&old).await.unwrap();
+    store.append_sample(&fresh).await.unwrap();
+
+    let got = store.fetch_samples("/e").await.unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].baseline_body, r#"{"v":"fresh"}"#);
 }

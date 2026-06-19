@@ -1,7 +1,36 @@
 use std::collections::HashMap;
 
 use crate::config::{EndpointConfig, Threshold};
-use crate::storage::FieldAggregation;
+
+/// Per-field diff tallies computed at read time from the stored raw samples.
+/// The regression verdict and percentages are derived from the live thresholds,
+/// so changing a threshold reclassifies every endpoint instantly.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FieldCounts {
+    pub raw_count: u64,
+    pub noise_count: u64,
+}
+
+impl FieldCounts {
+    /// `|raw − noise| / (raw + noise) × 100`. Zero when both counters are zero.
+    pub fn relative_difference(&self) -> f64 {
+        let raw = self.raw_count as f64;
+        let noise = self.noise_count as f64;
+        let denominator = raw + noise;
+        if denominator == 0.0 {
+            return 0.0;
+        }
+        (raw - noise).abs() / denominator * 100.0
+    }
+
+    /// `|raw − noise| / endpoint_total × 100`. Zero when no requests recorded.
+    pub fn absolute_difference(&self, endpoint_total: u64) -> f64 {
+        if endpoint_total == 0 {
+            return 0.0;
+        }
+        (self.raw_count as f64 - self.noise_count as f64).abs() / endpoint_total as f64 * 100.0
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct RegressionClassifier {
@@ -21,7 +50,7 @@ impl RegressionClassifier {
         Self::new(threshold.relative, threshold.absolute)
     }
 
-    pub fn is_regression(&self, field: &FieldAggregation, endpoint_total: u64) -> bool {
+    pub fn is_regression(&self, field: &FieldCounts, endpoint_total: u64) -> bool {
         field.raw_count > field.noise_count
             && field.relative_difference() > self.relative_threshold
             && field.absolute_difference(endpoint_total) > self.absolute_threshold

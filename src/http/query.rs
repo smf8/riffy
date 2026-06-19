@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
@@ -8,11 +9,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::analysis::classify::EndpointClassifiers;
-use crate::analysis::counters::LiveCounters;
-use crate::compare::flatten::STATUS_FIELD;
+use crate::analysis::engine::{DiffEngine, EndpointCounts};
 use crate::error::AppError;
-use crate::storage::{DiffStore, EndpointAggregation, FieldAggregation, SamplePage};
+use crate::storage::SampleStore;
 
 const DEFAULT_SAMPLE_LIMIT: usize = 20;
 const MAX_SAMPLE_LIMIT: usize = 100;
@@ -32,35 +31,41 @@ pub struct EndpointPaths {
     pub last_updated: DateTime<Utc>,
 }
 
-impl From<EndpointAggregation> for EndpointPaths {
-    fn from(aggregation: EndpointAggregation) -> Self {
-        let mut paths: Vec<String> = aggregation.fields.into_keys().collect();
+impl From<EndpointCounts> for EndpointPaths {
+    fn from(counts: EndpointCounts) -> Self {
+        let mut paths: Vec<String> = counts.fields.into_keys().collect();
         paths.sort();
         Self {
-            endpoint: aggregation.endpoint,
-            total: aggregation.total,
+            endpoint: counts.endpoint,
+            total: counts.total,
             paths,
-            last_updated: aggregation.last_updated,
+            last_updated: counts.last_updated,
         }
     }
 }
 
 pub async fn list_paths(
-    State(store): State<Arc<dyn DiffStore>>,
+    State(store): State<Arc<dyn SampleStore>>,
+    State(engine): State<Arc<DiffEngine>>,
     Query(query): Query<PathsQuery>,
 ) -> Result<Response, AppError> {
     match query.endpoint {
         Some(endpoint) => {
-            let aggregation = store.get_aggregation(&endpoint).await?.ok_or_else(|| {
+            let samples = store.fetch_samples(&endpoint).await?;
+            let counts = engine.aggregate(&endpoint, &samples).ok_or_else(|| {
                 AppError::NotFound(format!("no diffs recorded for endpoint '{endpoint}'"))
             })?;
-            Ok(Json(EndpointPaths::from(aggregation)).into_response())
+            Ok(Json(EndpointPaths::from(counts)).into_response())
         }
         None => {
-            let mut aggregations = store.list_aggregations().await?;
-            aggregations.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
-            let endpoints: Vec<EndpointPaths> =
-                aggregations.into_iter().map(EndpointPaths::from).collect();
+            let mut endpoints: Vec<EndpointPaths> = Vec::new();
+            for endpoint in store.list_endpoints().await? {
+                let samples = store.fetch_samples(&endpoint).await?;
+                if let Some(counts) = engine.aggregate(&endpoint, &samples) {
+                    endpoints.push(EndpointPaths::from(counts));
+                }
+            }
+            endpoints.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
             Ok(Json(json!({ "endpoints": endpoints })).into_response())
         }
     }
@@ -74,23 +79,9 @@ pub struct DetailQuery {
     pub offset: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct DiffDetail {
-    pub endpoint: String,
-    pub path: String,
-    pub total: u64,
-    pub raw_count: u64,
-    pub noise_count: u64,
-    pub is_regression: bool,
-    pub relative_difference: f64,
-    pub absolute_difference: f64,
-    pub last_updated: Option<DateTime<Utc>>,
-    pub samples: SamplePage,
-}
-
 pub async fn diff_detail(
-    State(store): State<Arc<dyn DiffStore>>,
-    State(classifiers): State<Arc<EndpointClassifiers>>,
+    State(store): State<Arc<dyn SampleStore>>,
+    State(engine): State<Arc<DiffEngine>>,
     Query(query): Query<DetailQuery>,
 ) -> Result<Response, AppError> {
     let limit = query
@@ -99,57 +90,29 @@ pub async fn diff_detail(
         .clamp(1, MAX_SAMPLE_LIMIT);
     let offset = query.offset.unwrap_or(0).min(MAX_SAMPLE_OFFSET);
 
-    let aggregation = store.get_aggregation(&query.endpoint).await?;
-    let field = aggregation
-        .as_ref()
-        .and_then(|aggregation| aggregation.fields.get(&query.path));
+    let samples = store.fetch_samples(&query.endpoint).await?;
+    if samples.is_empty() {
+        return Err(AppError::NotFound(format!(
+            "no diffs recorded for endpoint '{}'",
+            query.endpoint
+        )));
+    }
 
-    let total = aggregation.as_ref().map(|a| a.total).unwrap_or(0);
-    let last_updated = aggregation.as_ref().map(|a| a.last_updated);
-    let (raw_count, noise_count) = match field {
-        Some(field) => (field.raw_count, field.noise_count),
-        None => (0, 0),
-    };
+    let detail = engine.detail(&query.endpoint, &query.path, &samples, limit, offset);
 
-    let samples = store
-        .recent_samples(&query.endpoint, &query.path, limit, offset)
-        .await?;
-
-    if field.is_none() && samples.items.is_empty() && !samples.has_more && offset == 0 {
+    if detail.raw_count == 0
+        && detail.noise_count == 0
+        && detail.samples.items.is_empty()
+        && !detail.samples.has_more
+        && offset == 0
+    {
         return Err(AppError::NotFound(format!(
             "no diffs recorded for endpoint '{}' path '{}'",
             query.endpoint, query.path
         )));
     }
 
-    let counts = FieldAggregation {
-        raw_count,
-        noise_count,
-    };
-    let is_regression = if query.path == STATUS_FIELD {
-        // A status divergence is categorically a regression when the candidate
-        // diverges more than the control — independent of percentage thresholds,
-        // which would dilute a rare but critical status difference.
-        counts.raw_count > counts.noise_count
-    } else {
-        classifiers
-            .for_endpoint(&query.endpoint)
-            .is_regression(&counts, total)
-    };
-
-    Ok(Json(DiffDetail {
-        endpoint: query.endpoint,
-        path: query.path,
-        total,
-        raw_count,
-        noise_count,
-        is_regression,
-        relative_difference: counts.relative_difference(),
-        absolute_difference: counts.absolute_difference(total),
-        last_updated,
-        samples,
-    })
-    .into_response())
+    Ok(Json(detail).into_response())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,20 +150,76 @@ pub struct ResetQuery {
 }
 
 pub async fn reset_stats(
-    State(store): State<Arc<dyn DiffStore>>,
-    State(counters): State<Arc<LiveCounters>>,
+    State(store): State<Arc<dyn SampleStore>>,
     Query(query): Query<ResetQuery>,
 ) -> Result<StatusCode, AppError> {
-    if store.get_aggregation(&query.endpoint).await?.is_none() {
+    let endpoints = store.list_endpoints().await?;
+    if !endpoints.iter().any(|e| e == &query.endpoint) {
         return Err(AppError::NotFound(format!(
             "no statistics recorded for endpoint '{}'",
             query.endpoint
         )));
     }
 
-    // Clear the buffer first so an in-flight flush can't re-add stale counts after the store is cleared.
-    counters.reset_endpoint(&query.endpoint);
-    store.reset_aggregation(&query.endpoint).await?;
-
+    store.delete_endpoint(&query.endpoint).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SuppressQuery {
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SuppressEndpointQuery {
+    pub endpoint: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SuppressBody {
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EndpointSuppress {
+    pub endpoint: String,
+    pub paths: Vec<String>,
+}
+
+pub async fn list_suppress(
+    State(engine): State<Arc<DiffEngine>>,
+    Query(query): Query<SuppressQuery>,
+) -> Response {
+    let rules = engine.rules();
+    match query.endpoint {
+        Some(endpoint) => {
+            let paths = rules.paths_for(&endpoint).to_vec();
+            Json(EndpointSuppress { endpoint, paths }).into_response()
+        }
+        None => {
+            let all: HashMap<String, Vec<String>> = rules.rules().clone();
+            Json(json!({ "rules": all })).into_response()
+        }
+    }
+}
+
+pub async fn put_suppress(
+    State(engine): State<Arc<DiffEngine>>,
+    Query(query): Query<SuppressEndpointQuery>,
+    Json(body): Json<SuppressBody>,
+) -> Response {
+    engine.set_suppress(&query.endpoint, body.paths.clone());
+    Json(EndpointSuppress {
+        endpoint: query.endpoint,
+        paths: body.paths,
+    })
+    .into_response()
+}
+
+pub async fn delete_suppress(
+    State(engine): State<Arc<DiffEngine>>,
+    Query(query): Query<SuppressEndpointQuery>,
+) -> StatusCode {
+    engine.set_suppress(&query.endpoint, Vec::new());
+    StatusCode::NO_CONTENT
 }

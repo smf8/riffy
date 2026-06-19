@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use crate::compare::flatten::FieldDiff;
 use crate::config::EndpointConfig;
 
 /// Per-endpoint suppress lists with two match modes selected by whether the pattern contains `*`:
@@ -11,11 +10,15 @@ use crate::config::EndpointConfig;
 /// - **Glob** (contains `*`): `*` matches exactly one dot-separated segment;
 ///   path length must equal pattern length.
 ///   `"meta.*"` matches `"meta.ts"` but not `"meta.nested.v"`.
-pub struct EndpointSuppressPaths {
+///
+/// The whole set is swapped atomically behind an `ArcSwap` in the `DiffEngine`,
+/// so it is read on every diff and replaced wholesale on a runtime edit.
+#[derive(Debug, Clone, Default)]
+pub struct SuppressRules {
     per_endpoint: HashMap<String, Vec<String>>,
 }
 
-impl EndpointSuppressPaths {
+impl SuppressRules {
     pub fn from_config(endpoints: &[EndpointConfig]) -> Self {
         let per_endpoint = endpoints
             .iter()
@@ -25,16 +28,34 @@ impl EndpointSuppressPaths {
         Self { per_endpoint }
     }
 
-    pub fn suppress(&self, endpoint: &str, diffs: &mut HashMap<String, FieldDiff>) {
-        let Some(paths) = self.per_endpoint.get(endpoint) else {
-            return;
-        };
-        diffs.retain(|k, _| !is_suppressed(k, paths));
+    pub fn rules(&self) -> &HashMap<String, Vec<String>> {
+        &self.per_endpoint
     }
-}
 
-fn is_suppressed(path: &str, suppress_paths: &[String]) -> bool {
-    suppress_paths.iter().any(|s| matches_pattern(path, s))
+    pub fn paths_for(&self, endpoint: &str) -> &[String] {
+        self.per_endpoint
+            .get(endpoint)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn is_suppressed(&self, endpoint: &str, path: &str) -> bool {
+        self.paths_for(endpoint)
+            .iter()
+            .any(|s| matches_pattern(path, s))
+    }
+
+    /// Replace one endpoint's rules, returning the new set. An empty list clears
+    /// the endpoint. Cloning the map is cheap relative to how rarely rules change.
+    pub fn with_endpoint(&self, endpoint: &str, paths: Vec<String>) -> Self {
+        let mut per_endpoint = self.per_endpoint.clone();
+        if paths.is_empty() {
+            per_endpoint.remove(endpoint);
+        } else {
+            per_endpoint.insert(endpoint.to_owned(), paths);
+        }
+        Self { per_endpoint }
+    }
 }
 
 fn matches_pattern(path: &str, pattern: &str) -> bool {

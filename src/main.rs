@@ -5,13 +5,13 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use anyhow::Context;
 use clap::Parser;
 use riffy::analysis::classify::EndpointClassifiers;
-use riffy::analysis::counters::LiveCounters;
-use riffy::analysis::suppress::EndpointSuppressPaths;
+use riffy::analysis::engine::DiffEngine;
+use riffy::analysis::suppress::SuppressRules;
 use riffy::config::{CliOverrides, StorageBackend};
 use riffy::endpoint::EndpointMatcher;
 use riffy::http::router::{admin_router, create_router, AdminState, AppState};
 use riffy::pipeline::consumer::Consumer;
-use riffy::storage::{DiffStore, InMemoryDiffStore, RedisDiffStore};
+use riffy::storage::{InMemorySampleStore, RedisSampleStore, SampleStore};
 use riffy::upstream::UpstreamClient;
 use riffy::{config, pipeline, telemetry};
 use std::path::PathBuf;
@@ -66,30 +66,24 @@ async fn main() -> anyhow::Result<()> {
 
     let (analysis_tx, analysis_rx) = pipeline::channel(cfg.pipeline.channel_capacity);
 
-    let collector = Arc::new(LiveCounters::new());
     let patterns: Vec<String> = cfg.endpoints.iter().map(|e| e.pattern.clone()).collect();
     let matcher = Arc::new(EndpointMatcher::new(&patterns));
-    let classifiers = Arc::new(EndpointClassifiers::from_config(&cfg.endpoints));
-    let suppress = Arc::new(EndpointSuppressPaths::from_config(&cfg.endpoints));
+    let engine = Arc::new(DiffEngine::new(
+        SuppressRules::from_config(&cfg.endpoints),
+        EndpointClassifiers::from_config(&cfg.endpoints),
+    ));
 
-    let aggregation_interval = cfg.storage.aggregation_interval;
-    let store: Arc<dyn DiffStore> = match &cfg.storage.backend {
+    let store: Arc<dyn SampleStore> = match &cfg.storage.backend {
         StorageBackend::Redis { uri } => {
-            let store = RedisDiffStore::connect(
-                uri,
-                cfg.storage.stream_cap,
-                cfg.storage.bucket,
-                cfg.storage.window,
-            )
-            .await
-            .context("failed to connect to redis")?;
+            let store = RedisSampleStore::connect(uri, cfg.storage.sample_cap, cfg.storage.window)
+                .await
+                .context("failed to connect to redis")?;
             Arc::new(store)
         }
         StorageBackend::InMemory => {
-            tracing::info!("using in-memory diff store (no persistence)");
-            Arc::new(InMemoryDiffStore::with_retention(
-                cfg.storage.stream_cap,
-                cfg.storage.bucket,
+            tracing::info!("using in-memory sample store (no persistence)");
+            Arc::new(InMemorySampleStore::with_retention(
+                cfg.storage.sample_cap,
                 cfg.storage.window,
             ))
         }
@@ -98,10 +92,8 @@ async fn main() -> anyhow::Result<()> {
     let consumer_handle = Consumer::new(
         analysis_rx,
         matcher.clone(),
-        collector.clone(),
         store.clone(),
-        aggregation_interval,
-        suppress,
+        cfg.storage.max_body_bytes,
     )
     .spawn();
 
@@ -134,8 +126,7 @@ async fn main() -> anyhow::Result<()> {
     let admin_app = admin_router(AdminState {
         metrics: metrics_handle,
         store,
-        classifiers,
-        counters: collector,
+        engine,
         upstreams,
     });
     let admin_addr = format!("{}:{}", cfg.server.address, cfg.server.admin_port);

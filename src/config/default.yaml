@@ -14,12 +14,13 @@ upstream:
   timeout: 30s
 
 storage:
-  aggregation_interval: 1s
-  stream_cap: 10000
-  # Aggregation counts age out past `window` and are bucketed at `bucket`
-  # resolution, so the regression verdict reflects recent traffic only.
+  # Per-endpoint cap on retained raw samples.
+  sample_cap: 10000
+  # Samples older than `window` are ignored at read time, so the regression
+  # verdict reflects recent traffic only.
   window: 60m
-  bucket: 1m
+  # Decoded upstream bodies larger than this are not stored.
+  max_body_bytes: 262144
   backend:
     type: in_memory
 

@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use axum::routing::any;
 use axum::{Json, Router};
-use riffy::analysis::counters::LiveCounters;
-use riffy::analysis::suppress::EndpointSuppressPaths;
+use riffy::analysis::classify::EndpointClassifiers;
+use riffy::analysis::engine::DiffEngine;
+use riffy::analysis::suppress::SuppressRules;
 use riffy::config::{
     EndpointConfig, Jaeger, Logging, Metrics, Pipeline, Proxy, Riffy, Server, Storage,
     StorageBackend, Threshold, Upstream,
@@ -14,9 +15,11 @@ use riffy::config::{
 use riffy::endpoint::EndpointMatcher;
 use riffy::http::router::{create_router, AppState};
 use riffy::pipeline::consumer::Consumer;
-use riffy::storage::{DiffEntry, InMemoryDiffStore};
+use riffy::storage::{InMemorySampleStore, RawSample, SampleStore};
 use riffy::upstream::UpstreamClient;
 use serde_json::{json, Value};
+
+const EP: &str = "/api/v1/users/:id";
 
 async fn spawn_json_upstream(body: Value) -> SocketAddr {
     let app = Router::new().fallback(any(move || {
@@ -45,7 +48,7 @@ fn test_config() -> Riffy {
             timeout: Duration::from_secs(5),
         },
         endpoints: vec![EndpointConfig {
-            pattern: "/api/v1/users/:id".to_owned(),
+            pattern: EP.to_owned(),
             threshold: Threshold {
                 relative: 20.0,
                 absolute: 0.03,
@@ -56,10 +59,9 @@ fn test_config() -> Riffy {
             store_credentials_header: false,
         }],
         storage: Storage {
-            aggregation_interval: Duration::from_secs(1),
-            stream_cap: 10_000,
+            sample_cap: 10_000,
             window: Duration::from_secs(3600),
-            bucket: Duration::from_secs(60),
+            max_body_bytes: 262_144,
             backend: StorageBackend::InMemory,
         },
         server: Server {
@@ -84,7 +86,7 @@ fn test_config() -> Riffy {
 
 struct TestProxy {
     addr: SocketAddr,
-    store: Arc<InMemoryDiffStore>,
+    store: Arc<InMemorySampleStore>,
 }
 
 async fn spawn_proxy(
@@ -113,8 +115,7 @@ async fn spawn_proxy_with_config(
     );
 
     let (analysis_tx, analysis_rx) = riffy::pipeline::channel(1024);
-    let collector = Arc::new(LiveCounters::new());
-    let store = Arc::new(InMemoryDiffStore::new());
+    let store = Arc::new(InMemorySampleStore::new());
     let matcher = Arc::new(EndpointMatcher::new(
         &config
             .endpoints
@@ -126,10 +127,8 @@ async fn spawn_proxy_with_config(
     Consumer::new(
         analysis_rx,
         matcher.clone(),
-        collector,
         store.clone(),
-        Duration::from_secs(3600),
-        Arc::new(EndpointSuppressPaths::from_config(&[])),
+        config.storage.max_body_bytes,
     )
     .spawn();
 
@@ -151,19 +150,26 @@ fn http_client() -> reqwest::Client {
     reqwest::Client::builder().no_proxy().build().unwrap()
 }
 
-async fn wait_for_entries(store: &InMemoryDiffStore) -> Vec<DiffEntry> {
+async fn wait_for_samples(store: &InMemorySampleStore) -> Vec<RawSample> {
     for _ in 0..200 {
-        let entries = store.entries().await;
-        if !entries.is_empty() {
-            return entries;
+        let samples = store.fetch_samples(EP).await.unwrap();
+        if !samples.is_empty() {
+            return samples;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("no diff entries arrived within 2s");
+    panic!("no raw samples arrived within 2s");
+}
+
+fn engine() -> DiffEngine {
+    DiffEngine::new(
+        SuppressRules::from_config(&[]),
+        EndpointClassifiers::from_config(&[]),
+    )
 }
 
 #[tokio::test]
-async fn client_gets_baseline_response_and_diffs_are_recorded() {
+async fn client_gets_baseline_response_and_raw_sample_is_recorded() {
     let baseline_body = json!({"name": "alice", "version": 1});
     let baseline = spawn_json_upstream(baseline_body.clone()).await;
     let control = spawn_json_upstream(json!({"name": "alice", "version": 1})).await;
@@ -181,19 +187,22 @@ async fn client_gets_baseline_response_and_diffs_are_recorded() {
     let body: Value = response.json().await.unwrap();
     assert_eq!(body, baseline_body);
 
-    let entries = wait_for_entries(&proxy.store).await;
-    assert_eq!(entries.len(), 1);
+    let samples = wait_for_samples(&proxy.store).await;
+    assert_eq!(samples.len(), 1);
+    let s = &samples[0];
+    assert_eq!(s.endpoint, EP);
+    assert_eq!(s.baseline_status, 200);
+    assert_eq!(s.candidate_status, Some(200));
+    assert!(s.candidate_body.is_some());
 
-    let entry = &entries[0];
-    assert_eq!(entry.endpoint, "/api/v1/users/:id");
-    assert!(entry.raw_fields.contains_key("name"));
-    assert!(entry.noise_fields.is_empty());
-    assert_eq!(entry.baseline_status, 200);
-    assert_eq!(entry.candidate_status, Some(200));
+    // The diff (name) is derived at read time from the stored raw sample.
+    let counts = engine().aggregate(EP, &samples).unwrap();
+    assert!(counts.fields.contains_key("name"));
+    assert!(!counts.fields.contains_key("version"));
 }
 
 #[tokio::test]
-async fn identical_upstreams_produce_no_diff_entries() {
+async fn identical_upstreams_still_record_a_sample() {
     let body = json!({"a": 1});
     let baseline = spawn_json_upstream(body.clone()).await;
     let control = spawn_json_upstream(body.clone()).await;
@@ -208,8 +217,11 @@ async fn identical_upstreams_produce_no_diff_entries() {
         .unwrap();
     assert_eq!(response.status(), 200);
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(proxy.store.entries().await.is_empty());
+    // Producer records raw data unconditionally; the read-time diff finds nothing.
+    let samples = wait_for_samples(&proxy.store).await;
+    assert_eq!(samples.len(), 1);
+    let counts = engine().aggregate(EP, &samples).unwrap();
+    assert!(counts.fields.is_empty());
 }
 
 #[tokio::test]
@@ -233,9 +245,9 @@ async fn mutating_methods_skip_fanout_but_proxy_baseline() {
     let body: Value = response.json().await.unwrap();
     assert_eq!(body, baseline_body);
 
-    // No fan-out to candidate/control, so no diff entries.
+    // No fan-out to candidate/control, so no sample is recorded.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(proxy.store.entries().await.is_empty());
+    assert!(proxy.store.fetch_samples(EP).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -261,5 +273,5 @@ async fn sample_rate_zero_skips_fanout() {
     assert_eq!(body, baseline_body);
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(proxy.store.entries().await.is_empty());
+    assert!(proxy.store.fetch_samples(EP).await.unwrap().is_empty());
 }

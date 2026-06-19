@@ -27,10 +27,9 @@ fn valid_config() -> Riffy {
             store_credentials_header: false,
         }],
         storage: Storage {
-            aggregation_interval: Duration::from_secs(1),
-            stream_cap: 10_000,
+            sample_cap: 10_000,
             window: Duration::from_secs(3600),
-            bucket: Duration::from_secs(60),
+            max_body_bytes: 262_144,
             backend: StorageBackend::Redis {
                 uri: "redis://localhost:6379".to_owned(),
             },
@@ -110,9 +109,16 @@ fn zero_channel_capacity_fails() {
 }
 
 #[test]
-fn zero_stream_cap_fails() {
+fn zero_sample_cap_fails() {
     let mut cfg = valid_config();
-    cfg.storage.stream_cap = 0;
+    cfg.storage.sample_cap = 0;
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn zero_max_body_bytes_fails() {
+    let mut cfg = valid_config();
+    cfg.storage.max_body_bytes = 0;
     assert!(cfg.validate().is_err());
 }
 

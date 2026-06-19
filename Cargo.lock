@@ -1791,6 +1791,7 @@ name = "riffy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-compression",
  "async-trait",
  "axum",

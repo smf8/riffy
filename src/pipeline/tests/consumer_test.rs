@@ -1,16 +1,15 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use crate::analysis::counters::LiveCounters;
-use crate::analysis::suppress::EndpointSuppressPaths;
-use crate::config::EndpointConfig;
 use crate::endpoint::EndpointMatcher;
 use crate::pipeline::consumer::Consumer;
 use crate::pipeline::{AnalysisMessage, RequestSnapshot};
-use crate::storage::InMemoryDiffStore;
+use crate::storage::{InMemorySampleStore, RawSample, SampleStore};
 use crate::upstream::client::UpstreamResponse;
 use axum::http::{HeaderMap, Method};
 use bytes::Bytes;
+
+const EP: &str = "/api/v1/users/:id";
+const NO_CAP: usize = 1 << 20;
 
 fn response(status: u16, body: &str) -> UpstreamResponse {
     UpstreamResponse {
@@ -36,34 +35,19 @@ fn message(
     }
 }
 
-/// Run a consumer over the given messages until the channel closes, then
-/// return the store for assertions. The aggregation interval is long, so the
-/// only flush is the final shutdown drain — which moves all buffered counts
-/// into the store. All count assertions therefore read the store, matching the
-/// "all reads go through the store" design.
-async fn run_consumer(messages: Vec<AnalysisMessage>) -> Arc<InMemoryDiffStore> {
-    run_consumer_with_endpoints(messages, vec![]).await
+async fn run_consumer(messages: Vec<AnalysisMessage>) -> Arc<InMemorySampleStore> {
+    run_consumer_with_cap(messages, NO_CAP).await
 }
 
-async fn run_consumer_with_endpoints(
+async fn run_consumer_with_cap(
     messages: Vec<AnalysisMessage>,
-    endpoints: Vec<EndpointConfig>,
-) -> Arc<InMemoryDiffStore> {
+    max_body_bytes: usize,
+) -> Arc<InMemorySampleStore> {
     let (tx, rx) = crate::pipeline::channel(1024);
-    let collector = Arc::new(LiveCounters::new());
-    let store = Arc::new(InMemoryDiffStore::new());
-    let matcher = Arc::new(EndpointMatcher::new(&["/api/v1/users/:id".to_owned()]));
-    let suppress = Arc::new(EndpointSuppressPaths::from_config(&endpoints));
+    let store = Arc::new(InMemorySampleStore::new());
+    let matcher = Arc::new(EndpointMatcher::new(&[EP.to_owned()]));
 
-    let handle = Consumer::new(
-        rx,
-        matcher,
-        collector,
-        store.clone(),
-        Duration::from_secs(3600),
-        suppress,
-    )
-    .spawn();
+    let handle = Consumer::new(rx, matcher, store.clone(), max_body_bytes).spawn();
 
     for msg in messages {
         tx.send(msg).await.unwrap();
@@ -74,8 +58,12 @@ async fn run_consumer_with_endpoints(
     store
 }
 
+async fn stored(store: &Arc<InMemorySampleStore>) -> Vec<RawSample> {
+    store.fetch_samples(EP).await.unwrap()
+}
+
 #[tokio::test]
-async fn writes_diff_entry_for_differing_responses() {
+async fn stores_sample_with_both_bodies_for_matching_status() {
     let store = run_consumer(vec![message(
         "/api/v1/users/42",
         r#"{"name": "alice"}"#,
@@ -84,20 +72,21 @@ async fn writes_diff_entry_for_differing_responses() {
     )])
     .await;
 
-    let entries = store.entries().await;
-    assert_eq!(entries.len(), 1);
-
-    let entry = &entries[0];
-    assert_eq!(entry.endpoint, "/api/v1/users/:id");
-    assert!(entry.raw_fields.contains_key("name"));
-    assert!(entry.noise_fields.is_empty());
-    assert_eq!(entry.baseline_status, 200);
-    assert_eq!(entry.candidate_status, Some(200));
-    assert_eq!(entry.control_status, Some(200));
+    let samples = stored(&store).await;
+    assert_eq!(samples.len(), 1);
+    let s = &samples[0];
+    assert_eq!(s.endpoint, EP);
+    assert_eq!(s.baseline_status, 200);
+    assert_eq!(s.baseline_body, r#"{"name": "alice"}"#);
+    assert_eq!(s.candidate_status, Some(200));
+    assert_eq!(s.candidate_body.as_deref(), Some(r#"{"name": "bob"}"#));
+    assert_eq!(s.control_status, Some(200));
+    assert_eq!(s.control_body.as_deref(), Some(r#"{"name": "alice"}"#));
 }
 
 #[tokio::test]
-async fn identical_responses_produce_no_entry_but_count_total() {
+async fn identical_responses_still_store_a_sample() {
+    // Producer records raw data unconditionally; "no diff" is decided at read time.
     let body = r#"{"a": 1}"#;
     let store = run_consumer(vec![message(
         "/api/v1/users/1",
@@ -106,60 +95,25 @@ async fn identical_responses_produce_no_entry_but_count_total() {
         Some(body),
     )])
     .await;
-
-    assert!(store.entries().await.is_empty());
-
-    // The request still counts toward the endpoint total (flushed to the store).
-    let aggregation = store.aggregation("/api/v1/users/:id").await.unwrap();
-    assert_eq!(aggregation.total, 1);
-    assert!(aggregation.fields.is_empty());
+    assert_eq!(stored(&store).await.len(), 1);
 }
 
 #[tokio::test]
-async fn status_mismatch_alone_produces_entry() {
+async fn status_mismatch_stores_status_without_body() {
     let body = r#"{"a": 1}"#;
     let mut msg = message("/api/v1/users/1", body, Some(body), Some(body));
     msg.candidate_response.as_mut().unwrap().status = 500;
 
     let store = run_consumer(vec![msg]).await;
-
-    let entries = store.entries().await;
-    assert_eq!(entries.len(), 1);
-    // The status divergence is recorded as the reserved :status pseudo-field.
-    assert!(entries[0].raw_fields.contains_key(":status"));
-    assert!(entries[0].noise_fields.is_empty());
-    assert_eq!(entries[0].candidate_status, Some(500));
+    let samples = stored(&store).await;
+    assert_eq!(samples.len(), 1);
+    // Body is not stored for a divergent status — it is never compared at read time.
+    assert_eq!(samples[0].candidate_status, Some(500));
+    assert_eq!(samples[0].candidate_body, None);
 }
 
 #[tokio::test]
-async fn mismatched_status_skips_body_comparison() {
-    // The candidate body differs, but with a different status the bodies must
-    // never be compared — the status mismatch is the reported signal.
-    let mut msg = message(
-        "/api/v1/users/1",
-        r#"{"a": 1}"#,
-        Some(r#"{"a": 2}"#),
-        Some(r#"{"a": 1}"#),
-    );
-    msg.candidate_response.as_mut().unwrap().status = 503;
-
-    let store = run_consumer(vec![msg]).await;
-
-    let entries = store.entries().await;
-    assert_eq!(entries.len(), 1);
-    // Body not compared: only the status pseudo-field is recorded, not "a".
-    assert!(entries[0].raw_fields.contains_key(":status"));
-    assert!(!entries[0].raw_fields.contains_key("a"));
-    assert_eq!(entries[0].candidate_status, Some(503));
-    let aggregation = store.aggregation("/api/v1/users/:id").await.unwrap();
-    assert_eq!(aggregation.total, 1);
-    let status = aggregation.fields.get(":status").unwrap();
-    assert_eq!(status.raw_count, 1);
-    assert_eq!(status.noise_count, 0);
-}
-
-#[tokio::test]
-async fn invalid_candidate_json_is_skipped() {
+async fn invalid_candidate_json_stored_without_body() {
     let store = run_consumer(vec![message(
         "/api/v1/users/1",
         r#"{"a": 1}"#,
@@ -168,13 +122,14 @@ async fn invalid_candidate_json_is_skipped() {
     )])
     .await;
 
-    assert!(store.entries().await.is_empty());
-    let aggregation = store.aggregation("/api/v1/users/:id").await.unwrap();
-    assert_eq!(aggregation.total, 1);
+    let samples = stored(&store).await;
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].candidate_status, Some(200));
+    assert_eq!(samples[0].candidate_body, None);
 }
 
 #[tokio::test]
-async fn missing_candidate_yields_entry_with_noise_only() {
+async fn missing_candidate_stored_as_none() {
     let store = run_consumer(vec![message(
         "/api/v1/users/1",
         r#"{"a": 1}"#,
@@ -183,39 +138,11 @@ async fn missing_candidate_yields_entry_with_noise_only() {
     )])
     .await;
 
-    let entries = store.entries().await;
-    assert_eq!(entries.len(), 1);
-    assert!(entries[0].raw_fields.is_empty());
-    assert!(entries[0].noise_fields.contains_key("a"));
-    assert_eq!(entries[0].candidate_status, None);
-}
-
-#[tokio::test]
-async fn final_flush_writes_aggregation_snapshot() {
-    let store = run_consumer(vec![
-        message(
-            "/api/v1/users/1",
-            r#"{"n": 1}"#,
-            Some(r#"{"n": 2}"#),
-            Some(r#"{"n": 1}"#),
-        ),
-        message(
-            "/api/v1/users/2",
-            r#"{"n": 1}"#,
-            Some(r#"{"n": 3}"#),
-            Some(r#"{"n": 1}"#),
-        ),
-    ])
-    .await;
-
-    let aggregation = store.aggregation("/api/v1/users/:id").await.unwrap();
-    assert_eq!(aggregation.total, 2);
-
-    // The store holds raw counts only; the regression verdict is derived at
-    // read time (covered by the classify tests), not persisted here.
-    let field = aggregation.fields.get("n").unwrap();
-    assert_eq!(field.raw_count, 2);
-    assert_eq!(field.noise_count, 0);
+    let samples = stored(&store).await;
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].candidate_status, None);
+    assert_eq!(samples[0].candidate_body, None);
+    assert_eq!(samples[0].control_body.as_deref(), Some(r#"{"a": 2}"#));
 }
 
 #[tokio::test]
@@ -228,13 +155,44 @@ async fn non_json_baseline_is_skipped_entirely() {
     )])
     .await;
 
-    assert!(store.entries().await.is_empty());
-    // Never recorded, so nothing was flushed for this endpoint.
-    assert!(store.aggregation("/api/v1/users/:id").await.is_none());
+    assert!(stored(&store).await.is_empty());
+    assert!(store.list_endpoints().await.unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn gzip_baseline_is_decompressed_and_analyzed() {
+async fn oversized_baseline_is_skipped_and_oversized_candidate_dropped() {
+    // Cap below the candidate body but above the baseline: baseline stored,
+    // candidate body dropped.
+    let store = run_consumer_with_cap(
+        vec![message(
+            "/api/v1/users/1",
+            r#"{"a":1}"#,
+            Some(r#"{"a":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#),
+            Some(r#"{"a":1}"#),
+        )],
+        12,
+    )
+    .await;
+    let samples = stored(&store).await;
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].candidate_body, None);
+
+    // Now a baseline over the cap skips the whole sample.
+    let store = run_consumer_with_cap(
+        vec![message(
+            "/api/v1/users/1",
+            r#"{"a":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+            Some(r#"{"a":1}"#),
+            None,
+        )],
+        12,
+    )
+    .await;
+    assert!(stored(&store).await.is_empty());
+}
+
+#[tokio::test]
+async fn gzip_baseline_is_decompressed_and_stored_decoded() {
     use async_compression::tokio::bufread::GzipEncoder;
     use tokio::io::AsyncReadExt;
 
@@ -252,10 +210,9 @@ async fn gzip_baseline_is_decompressed_and_analyzed() {
     );
 
     let store = run_consumer(vec![msg]).await;
-
-    let entries = store.entries().await;
-    assert_eq!(entries.len(), 1);
-    assert!(entries[0].raw_fields.contains_key("a"));
+    let samples = stored(&store).await;
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].baseline_body, r#"{"a": 1}"#);
 }
 
 #[tokio::test]
@@ -267,15 +224,11 @@ async fn unsupported_encoding_on_baseline_is_skipped() {
     );
 
     let store = run_consumer(vec![msg]).await;
-
-    assert!(store.entries().await.is_empty());
-    assert!(store.aggregation("/api/v1/users/:id").await.is_none());
+    assert!(stored(&store).await.is_empty());
 }
 
 #[tokio::test]
 async fn unregistered_path_is_dropped() {
-    // The consumer only knows /api/v1/users/:id; an unregistered path is
-    // dropped (not analyzed, not stored) so cardinality stays bounded.
     let store = run_consumer(vec![message(
         "/other/route?q=1",
         r#"{"a": 1}"#,
@@ -284,128 +237,11 @@ async fn unregistered_path_is_dropped() {
     )])
     .await;
 
-    assert!(store.entries().await.is_empty());
-    assert!(store.aggregation("/other/route").await.is_none());
+    assert!(store.list_endpoints().await.unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn suppressed_path_is_excluded_from_diffs() {
-    let endpoints = vec![crate::config::EndpointConfig {
-        pattern: "/api/v1/users/:id".to_owned(),
-        threshold: Default::default(),
-        suppress_paths: vec!["name".to_owned()],
-        sample_rate: 1.0,
-        capture_request_curl: false,
-        store_credentials_header: false,
-    }];
-
-    let store = run_consumer_with_endpoints(
-        vec![message(
-            "/api/v1/users/1",
-            r#"{"name": "alice", "score": 10}"#,
-            Some(r#"{"name": "bob", "score": 10}"#),
-            Some(r#"{"name": "alice", "score": 10}"#),
-        )],
-        endpoints,
-    )
-    .await;
-
-    // `name` is suppressed — only identical `score` remains, so no entry is stored.
-    assert!(store.entries().await.is_empty());
-}
-
-#[tokio::test]
-async fn suppressed_prefix_removes_subtree() {
-    let endpoints = vec![crate::config::EndpointConfig {
-        pattern: "/api/v1/users/:id".to_owned(),
-        threshold: Default::default(),
-        suppress_paths: vec!["meta".to_owned()],
-        sample_rate: 1.0,
-        capture_request_curl: false,
-        store_credentials_header: false,
-    }];
-
-    let store = run_consumer_with_endpoints(
-        vec![message(
-            "/api/v1/users/1",
-            r#"{"meta": {"ts": 1, "v": 2}, "id": 1}"#,
-            Some(r#"{"meta": {"ts": 9, "v": 9}, "id": 1}"#),
-            Some(r#"{"meta": {"ts": 1, "v": 2}, "id": 1}"#),
-        )],
-        endpoints,
-    )
-    .await;
-
-    // `meta.ts` and `meta.v` are both suppressed by the `meta` prefix — no entry.
-    assert!(store.entries().await.is_empty());
-}
-
-#[tokio::test]
-async fn unsuppressed_sibling_is_still_recorded() {
-    let endpoints = vec![crate::config::EndpointConfig {
-        pattern: "/api/v1/users/:id".to_owned(),
-        threshold: Default::default(),
-        suppress_paths: vec!["name".to_owned()],
-        sample_rate: 1.0,
-        capture_request_curl: false,
-        store_credentials_header: false,
-    }];
-
-    let store = run_consumer_with_endpoints(
-        vec![message(
-            "/api/v1/users/1",
-            r#"{"name": "alice", "score": 10}"#,
-            Some(r#"{"name": "bob", "score": 99}"#),
-            Some(r#"{"name": "alice", "score": 10}"#),
-        )],
-        endpoints,
-    )
-    .await;
-
-    let entries = store.entries().await;
-    assert_eq!(entries.len(), 1);
-    // `name` is suppressed, `score` is not.
-    assert!(!entries[0].raw_fields.contains_key("name"));
-    assert!(entries[0].raw_fields.contains_key("score"));
-}
-
-#[tokio::test]
-async fn wildcard_suppress_path_filters_indexed_fields() {
-    // items.*.id suppresses id within each array element but leaves name intact.
-    let endpoints = vec![crate::config::EndpointConfig {
-        pattern: "/api/v1/users/:id".to_owned(),
-        threshold: Default::default(),
-        suppress_paths: vec!["items.*.id".to_owned()],
-        sample_rate: 1.0,
-        capture_request_curl: false,
-        store_credentials_header: false,
-    }];
-
-    let store = run_consumer_with_endpoints(
-        vec![message(
-            "/api/v1/users/1",
-            // Baseline: id and name present
-            r#"{"items": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]}"#,
-            // Candidate: id differs AND name of first item differs
-            Some(r#"{"items": [{"id": 9, "name": "z"}, {"id": 9, "name": "b"}]}"#),
-            Some(r#"{"items": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]}"#),
-        )],
-        endpoints,
-    )
-    .await;
-
-    let entries = store.entries().await;
-    // items.0.name diff remains after suppression → one entry stored.
-    assert_eq!(entries.len(), 1);
-    // id fields are suppressed.
-    assert!(!entries[0].raw_fields.contains_key("items.0.id"));
-    assert!(!entries[0].raw_fields.contains_key("items.1.id"));
-    // name diff is still present.
-    assert!(entries[0].raw_fields.contains_key("items.0.name"));
-}
-
-#[tokio::test]
-async fn captured_request_renders_curl_on_stored_entry() {
+async fn captured_request_renders_curl_on_stored_sample() {
     let mut msg = message(
         "/api/v1/users/1",
         r#"{"v": 1}"#,
@@ -421,17 +257,15 @@ async fn captured_request_renders_curl_on_stored_entry() {
     });
 
     let store = run_consumer(vec![msg]).await;
-
-    let entries = store.entries().await;
-    assert_eq!(entries.len(), 1);
-    let curl = entries[0].request_curl.as_ref().expect("curl captured");
+    let samples = stored(&store).await;
+    assert_eq!(samples.len(), 1);
+    let curl = samples[0].request_curl.as_ref().expect("curl captured");
     assert!(curl.starts_with("curl -X GET"));
     assert!(curl.contains("'$RIFFY_TARGET/api/v1/users/1?debug=1'"));
 }
 
 #[tokio::test]
 async fn no_snapshot_means_no_curl() {
-    // The default `message` helper carries `request: None`.
     let store = run_consumer(vec![message(
         "/api/v1/users/1",
         r#"{"v": 1}"#,
@@ -440,7 +274,7 @@ async fn no_snapshot_means_no_curl() {
     )])
     .await;
 
-    let entries = store.entries().await;
-    assert_eq!(entries.len(), 1);
-    assert!(entries[0].request_curl.is_none());
+    let samples = stored(&store).await;
+    assert_eq!(samples.len(), 1);
+    assert!(samples[0].request_curl.is_none());
 }

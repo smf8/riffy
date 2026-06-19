@@ -1,189 +1,81 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use super::error::StoreError;
-use super::{
-    current_bucket, merge_aggregation, window_bucket_count, DiffEntry, DiffSample, DiffStore,
-    EndpointAggregation, SamplePage,
-};
+use super::{RawSample, SampleStore};
 use chrono::Utc;
 use tokio::sync::Mutex;
 
-const DEFAULT_BUCKET_SECS: u64 = 60;
 const DEFAULT_WINDOW_SECS: u64 = 3600;
 
-pub struct InMemoryDiffStore {
-    entries: Mutex<VecDeque<DiffEntry>>,
-    aggregations: Mutex<HashMap<String, BTreeMap<u64, EndpointAggregation>>>,
-    /// Max retained samples; oldest is dropped when exceeded.
+pub struct InMemorySampleStore {
+    endpoints: Mutex<HashMap<String, VecDeque<RawSample>>>,
+    /// Max retained samples per endpoint; oldest is dropped when exceeded.
     cap: usize,
-    bucket_secs: u64,
     window_secs: u64,
 }
 
-impl Default for InMemoryDiffStore {
+impl Default for InMemorySampleStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl InMemoryDiffStore {
+impl InMemorySampleStore {
     pub fn new() -> Self {
         Self::with_capacity(usize::MAX)
     }
 
     pub fn with_capacity(cap: usize) -> Self {
-        Self::with_retention(
-            cap,
-            Duration::from_secs(DEFAULT_BUCKET_SECS),
-            Duration::from_secs(DEFAULT_WINDOW_SECS),
-        )
+        Self::with_retention(cap, Duration::from_secs(DEFAULT_WINDOW_SECS))
     }
 
-    pub fn with_retention(cap: usize, bucket: Duration, window: Duration) -> Self {
+    pub fn with_retention(cap: usize, window: Duration) -> Self {
         Self {
-            entries: Mutex::new(VecDeque::new()),
-            aggregations: Mutex::new(HashMap::new()),
-            cap,
-            bucket_secs: bucket.as_secs().max(1),
+            endpoints: Mutex::new(HashMap::new()),
+            cap: cap.max(1),
             window_secs: window.as_secs().max(1),
         }
     }
 
-    pub async fn entries(&self) -> Vec<DiffEntry> {
-        self.entries.lock().await.iter().cloned().collect()
-    }
-
-    pub async fn aggregation(&self, endpoint: &str) -> Option<EndpointAggregation> {
-        self.windowed(endpoint).await
-    }
-
-    async fn windowed(&self, endpoint: &str) -> Option<EndpointAggregation> {
-        let current = current_bucket(self.bucket_secs);
-        let count = window_bucket_count(self.window_secs, self.bucket_secs);
-        let from = current.saturating_sub(count.saturating_sub(1));
-
-        let map = self.aggregations.lock().await;
-        let buckets = map.get(endpoint)?;
-
-        let mut acc = None;
-        for (_bucket, agg) in buckets.range(from..=current) {
-            merge_aggregation(&mut acc, agg.clone());
-        }
-        acc
+    fn within_window(&self, sample: &RawSample, now: chrono::DateTime<Utc>) -> bool {
+        let age = now.signed_duration_since(sample.timestamp);
+        age.num_seconds() <= self.window_secs as i64
     }
 }
 
 #[async_trait::async_trait]
-impl DiffStore for InMemoryDiffStore {
-    async fn append_diff(&self, entry: &DiffEntry) -> Result<(), StoreError> {
-        let mut entries = self.entries.lock().await;
-        entries.push_back(entry.clone());
-        while entries.len() > self.cap {
-            entries.pop_front();
+impl SampleStore for InMemorySampleStore {
+    async fn append_sample(&self, sample: &RawSample) -> Result<(), StoreError> {
+        let mut endpoints = self.endpoints.lock().await;
+        let samples = endpoints.entry(sample.endpoint.clone()).or_default();
+        samples.push_back(sample.clone());
+        while samples.len() > self.cap {
+            samples.pop_front();
         }
         Ok(())
     }
 
-    async fn add_aggregation(&self, deltas: &[EndpointAggregation]) -> Result<(), StoreError> {
+    async fn fetch_samples(&self, endpoint: &str) -> Result<Vec<RawSample>, StoreError> {
         let now = Utc::now();
-        let bucket = current_bucket(self.bucket_secs);
-        let keep_from =
-            bucket.saturating_sub(window_bucket_count(self.window_secs, self.bucket_secs));
+        let endpoints = self.endpoints.lock().await;
+        let Some(samples) = endpoints.get(endpoint) else {
+            return Ok(Vec::new());
+        };
+        Ok(samples
+            .iter()
+            .rev()
+            .filter(|s| self.within_window(s, now))
+            .cloned()
+            .collect())
+    }
 
-        let mut map = self.aggregations.lock().await;
-        for delta in deltas {
-            let buckets = map.entry(delta.endpoint.clone()).or_default();
-            let agg = buckets
-                .entry(bucket)
-                .or_insert_with(|| EndpointAggregation {
-                    endpoint: delta.endpoint.clone(),
-                    total: 0,
-                    fields: HashMap::new(),
-                    last_updated: now,
-                });
-            agg.total += delta.total;
-            agg.last_updated = now;
-            for (path, field_delta) in &delta.fields {
-                let field = agg.fields.entry(path.clone()).or_default();
-                field.raw_count += field_delta.raw_count;
-                field.noise_count += field_delta.noise_count;
-            }
-            buckets.retain(|&b, _| b >= keep_from);
-        }
+    async fn list_endpoints(&self) -> Result<Vec<String>, StoreError> {
+        Ok(self.endpoints.lock().await.keys().cloned().collect())
+    }
+
+    async fn delete_endpoint(&self, endpoint: &str) -> Result<(), StoreError> {
+        self.endpoints.lock().await.remove(endpoint);
         Ok(())
-    }
-
-    async fn get_aggregation(
-        &self,
-        endpoint: &str,
-    ) -> Result<Option<EndpointAggregation>, StoreError> {
-        Ok(self.windowed(endpoint).await)
-    }
-
-    async fn list_aggregations(&self) -> Result<Vec<EndpointAggregation>, StoreError> {
-        let current = current_bucket(self.bucket_secs);
-        let count = window_bucket_count(self.window_secs, self.bucket_secs);
-        let from = current.saturating_sub(count.saturating_sub(1));
-
-        let map = self.aggregations.lock().await;
-        let mut out = Vec::new();
-        for buckets in map.values() {
-            let mut acc = None;
-            for (_bucket, agg) in buckets.range(from..=current) {
-                merge_aggregation(&mut acc, agg.clone());
-            }
-            if let Some(agg) = acc {
-                out.push(agg);
-            }
-        }
-        Ok(out)
-    }
-
-    async fn reset_aggregation(&self, endpoint: &str) -> Result<(), StoreError> {
-        self.aggregations.lock().await.remove(endpoint);
-        Ok(())
-    }
-
-    async fn recent_samples(
-        &self,
-        endpoint: &str,
-        path: &str,
-        limit: usize,
-        offset: usize,
-    ) -> Result<SamplePage, StoreError> {
-        // Collect one extra sample to determine has_more without a second pass.
-        let want = offset.saturating_add(limit).saturating_add(1);
-        let mut matches = Vec::new();
-
-        let entries = self.entries.lock().await;
-        for entry in entries.iter().rev() {
-            if entry.endpoint != endpoint {
-                continue;
-            }
-            let raw = entry.raw_fields.get(path).cloned();
-            let noise = entry.noise_fields.get(path).cloned();
-            if raw.is_none() && noise.is_none() {
-                continue;
-            }
-            matches.push(DiffSample {
-                timestamp: entry.timestamp,
-                raw,
-                noise,
-                request_curl: entry.request_curl.clone(),
-            });
-            if matches.len() >= want {
-                break;
-            }
-        }
-
-        let has_more = matches.len() > offset.saturating_add(limit);
-        let items = matches.into_iter().skip(offset).take(limit).collect();
-        Ok(SamplePage {
-            items,
-            limit,
-            offset,
-            has_more,
-        })
     }
 }

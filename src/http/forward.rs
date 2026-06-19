@@ -116,14 +116,21 @@ fn dispatch_analysis(state: &AppState, endpoint: &ResolvedEndpoint, req: Dispatc
         .iter()
         .find(|e| e.pattern == endpoint_key.as_ref());
 
+    if ep_cfg.is_none() {
+        tracing::warn!(path_and_query = %req.path_and_query, "no registered endpoint config found");
+        return;
+    }
+
+    let ep_cfg = ep_cfg.unwrap();
+
     // sample_rate=0.0 always skips; sample_rate=1.0 bypasses the RNG entirely.
-    let sample_rate = ep_cfg.map(|e| e.sample_rate).unwrap_or(1.0);
+    let sample_rate = ep_cfg.sample_rate;
     if sample_rate < 1.0 && rand::random::<f64>() >= sample_rate {
         return;
     }
 
-    let capture_request_curl = ep_cfg.map(|e| e.capture_request_curl).unwrap_or(false);
-    let store_credentials_header = ep_cfg.map(|e| e.store_credentials_header).unwrap_or(false);
+    let capture_request_curl = ep_cfg.capture_request_curl;
+    let store_credentials_header = ep_cfg.store_credentials_header;
 
     let upstream = state.upstream.clone();
     let analysis_tx = state.analysis_tx.clone();
@@ -142,6 +149,7 @@ fn dispatch_analysis(state: &AppState, endpoint: &ResolvedEndpoint, req: Dispatc
 
     tokio::spawn(
         async move {
+            // bytes::Bytes is cheap to clone
             let candidate_body = body.clone();
             let control_body = body.clone();
 

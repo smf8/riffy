@@ -138,19 +138,18 @@ pub struct EndpointConfig {
 #[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Storage {
-    #[garde(skip)]
-    #[serde(with = "humantime_serde")]
-    pub aggregation_interval: Duration,
+    /// Per-endpoint cap on retained raw samples; oldest is dropped past it.
     #[garde(range(min = 1))]
-    pub stream_cap: usize,
-    /// Counts older than this window age out, so the regression verdict reflects only recent traffic.
+    pub sample_cap: usize,
+    /// Samples older than this window are ignored at read time, so the regression
+    /// verdict reflects only recent traffic.
     #[garde(skip)]
     #[serde(with = "humantime_serde")]
     pub window: Duration,
-    /// Time-bucket granularity; counts are bucketed at this resolution within the window.
-    #[garde(skip)]
-    #[serde(with = "humantime_serde")]
-    pub bucket: Duration,
+    /// A decoded upstream body over this size is not stored: baseline over the cap
+    /// skips the whole sample, candidate/control over it are stored without a body.
+    #[garde(range(min = 1))]
+    pub max_body_bytes: usize,
     #[garde(dive)]
     pub backend: StorageBackend,
 }
@@ -277,14 +276,6 @@ impl Riffy {
         ensure!(
             self.server.proxy_port != self.server.admin_port,
             "server.proxy-port and server.admin-port must differ"
-        );
-        ensure!(
-            self.storage.bucket.as_secs() >= 1,
-            "storage.bucket must be >= 1s"
-        );
-        ensure!(
-            self.storage.window >= self.storage.bucket,
-            "storage.window must be >= storage.bucket"
         );
 
         Ok(())

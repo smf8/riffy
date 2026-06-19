@@ -3,10 +3,19 @@
 Riffy is a reverse proxy that detects statistical regressions between three
 upstream deployments of the same service. Every request is answered from the
 **baseline** upstream with zero analysis overhead; the **candidate** (new code)
-and **control** (baseline replica) are called in the background, and their
-responses are diffed against the baseline asynchronously. Fields where
-baseline-vs-candidate disagreement (**raw**) significantly exceeds
-baseline-vs-control disagreement (**noise**) are flagged as real regressions.
+and **control** (baseline replica) are called in the background. The producer
+side does only two things: decide whether to sample a request, and — for sampled
+requests — **store the raw responses of all three upstreams** as a `RawSample`
+(R41). Nothing is diffed, suppressed, counted, or classified on the write side.
+
+All analysis happens **at read time**, when the query API is hit: a `DiffEngine`
+(`src/analysis/engine.rs`) diffs the stored samples on the fly, applies its
+**suppression rules inline**, aggregates per-field raw/noise counts, and runs the
+regression verdict. Fields where baseline-vs-candidate disagreement (**raw**)
+significantly exceeds baseline-vs-control disagreement (**noise**) are flagged as
+real regressions. The engine's suppression rules are **writable at runtime**
+(R42): an `arc_swap::ArcSwap<SuppressRules>`, config-seeded, swapped wholesale by
+the `/suppress` admin API and taking effect on the next query with no restart.
 
 This document describes what the code *does today* and is the single source of
 truth for the runtime architecture. The inline `(R#)` tags mark deliberate
@@ -14,7 +23,7 @@ design decisions made along the way — historical markers, not entries in a
 separate changelog. To update this doc, use the `update-architecture-doc` skill
 in `.claude/skills/`.
 
-## Request & Analysis DAG
+## Request & Sampling DAG (producer side)
 
 ```mermaid
 flowchart TD
@@ -34,110 +43,106 @@ flowchart TD
         guard -- "no" --> baseline --> resp
     end
 
-    baseline -. "tokio::spawn — fire-and-forget" .-> fanout
+    baseline -. "tokio::spawn — fire-and-forget" .-> sampledecide
 
     subgraph background ["Background task, one per request (src/http/forward.rs)"]
+        sampledecide{"sample_rate gate:<br/>rand() &lt; sample_rate?<br/>(per-endpoint)"}
         fanout["tokio::join!<br/>CANDIDATE + CONTROL in parallel<br/>(src/upstream/client.rs)"]
-        send["try_send AnalysisMessage<br/>bounded mpsc, capacity = pipeline.channel-capacity<br/>(default 1024, R32); drop newest + warn when full (R12);<br/>carries an optional RequestSnapshot when the endpoint set<br/>capture_request_curl — assembled here, off the hot path (R38)<br/>(src/pipeline/mod.rs)"]
-        fanout --> send
+        send["try_send AnalysisMessage<br/>bounded mpsc, capacity = pipeline.channel-capacity<br/>(default 1024, R32); drop newest + warn when full (R12);<br/>carries an optional RequestSnapshot when the endpoint set<br/>capture_request_curl (R38)<br/>(src/pipeline/mod.rs)"]
+        sampledecide -- "no" --> dropped(["not sampled —<br/>no fan-out, no sample"])
+        sampledecide -- "yes" --> fanout --> send
     end
 
     send --> recv
 
-    subgraph consumer ["Analysis consumer — single task (src/pipeline/consumer.rs)"]
+    subgraph consumer ["Sample consumer — single task (src/pipeline/consumer.rs)"]
         recv["recv AnalysisMessage"]
-        resolve["EndpointMatcher.resolve → Option<br/>matchit radix tree (R40); :param segment match,<br/>most specific template wins, slashes normalized, query stripped;<br/>unregistered path → drop, not analyzed (R35)<br/>(src/endpoint/mod.rs)"]
-        baselineparse["parse baseline body:<br/>decode_body — gzip / x-gzip / deflate(zlib) / br / zstd<br/>via async-compression (R20) — then JSON parse;<br/>unparseable → skip request<br/>(src/pipeline/decode.rs, consumer.rs)"]
-        statuscheck{"per upstream:<br/>responded with same<br/>status as baseline? (R23)"}
-        diff["parse body, then flatten_value:<br/>diff → flatten to dot-paths<br/>raw = baseline vs candidate<br/>noise = baseline vs control<br/>(src/compare/)"]
-        nodiff[":status pseudo-field (StatusMismatch);<br/>body not compared — the status divergence<br/>is itself the signal (R23/R36)"]
-        record["LiveCounters.record<br/>DashMap + AtomicU64 write buffer:<br/>endpoint total, per-field raw / noise<br/>(src/analysis/counters.rs)"]
-        decide{"any raw/noise diffs?<br/>(incl. the :status field)"}
-        entry["DiffEntry (R13);<br/>renders request_curl from the snapshot<br/>($RIFFY_TARGET placeholder host, R38)<br/>(src/pipeline/curl.rs)"]
-        skip(["no stream entry —<br/>only counters moved"])
-        recv --> resolve --> baselineparse --> statuscheck
-        statuscheck -- "yes" --> diff --> record
-        statuscheck -- "no / upstream failed" --> nodiff --> record
-        record --> decide
-        decide -- "yes" --> entry
-        decide -- "no" --> skip
-
-        ticker["interval ticker — buffer drain<br/>aggregation-interval (1s default) (R29/R31)<br/>+ one final drain on shutdown (R19)"]
-        snapshot["LiveCounters.drain →<br/>raw count deltas per field (counters reset);<br/>restored to buffer on store-write failure (R32)<br/>(src/analysis/counters.rs)"]
-        ticker --> snapshot
+        resolve["EndpointMatcher.resolve → Option<br/>matchit radix tree (R40); :param segment match,<br/>most specific template wins, slashes normalized, query stripped;<br/>unregistered path → drop, not stored (R35)<br/>(src/endpoint/mod.rs)"]
+        baselinebody["decode + validate baseline body:<br/>decode_body — gzip / x-gzip / deflate(zlib) / br / zstd<br/>via async-compression (R20); must be JSON within<br/>storage.max-body-bytes (R44), else skip the whole sample<br/>(src/pipeline/decode.rs, consumer.rs)"]
+        otherbodies["per candidate/control:<br/>status = None if the call failed; body stored only when<br/>status == baseline AND JSON within max-body-bytes —<br/>exactly the cases read-time diff compares (R41)"]
+        curl["render request_curl from the snapshot<br/>($RIFFY_TARGET placeholder host, R38)<br/>(src/pipeline/curl.rs)"]
+        append["SampleStore.append_sample(RawSample)<br/>(src/storage/, R43)"]
+        recv --> resolve --> baselinebody --> otherbodies --> curl --> append
     end
 
-    entry --> xadd
-    snapshot --> hset
+    append --> xadd
 
-    subgraph store ["DiffStore trait (src/storage/mod.rs, R25) — RedisDiffStore (redis.rs) / InMemoryDiffStore, selected by storage.backend (default in-memory) (memory.rs, R29/R33)"]
-        xadd[("XADD MAXLEN ~ riffy:diffs<br/>per-request diff entry;<br/>capped at storage.stream-cap (R33)")]
-        hset[("HINCRBY riffy:agg:{endpoint}:{bucket}<br/>add deltas into the current time bucket; TTL = window+bucket;<br/>+ endpoint index set; atomic, sums across instances (R32/R37)")]
+    subgraph store ["SampleStore trait (src/storage/mod.rs, R25) — RedisSampleStore (redis.rs) / InMemorySampleStore (memory.rs), selected by storage.backend (default in-memory) (R29/R33/R43)"]
+        xadd[("XADD MAXLEN ~ riffy:samples:{endpoint}<br/>one entry per sampled request, capped at<br/>storage.sample-cap per endpoint; + SADD endpoint index;<br/>EXPIRE = storage.window ages out idle endpoints")]
     end
 ```
 
 Solid arrows are data flow within one request's lifecycle; the dotted arrow is
 the only hand-off from the client-blocking path to async work. The graph is
-acyclic: the ticker is an independent root, not a back-edge.
+acyclic. There is **no aggregation ticker and no pre-aggregation** anymore — the
+consumer's only job is to persist a raw sample (R41).
 
-## Admin server (observability + query API)
+## Admin server (read-time analysis + query API)
 
-The admin server carries
-`AdminState { metrics, store, classifiers, counters, upstreams }`
-(R29/R31/R33/R38); `FromRef` hands each route only the substate it needs. The query
-API reads the same `DiffStore` the consumer writes to, so it reflects the
-periodic aggregation snapshots (staleness ≤ the aggregation interval) and the
-per-request stream. A minimal Alpine.js dashboard is served at `GET /` (HTML +
-vendored Alpine embedded via `include_str!`, no build step) and drives that same
-read API from a browser (R34).
+The admin server carries `AdminState { metrics, store, engine, upstreams }`
+(R29/R31/R33/R42); `FromRef` hands each route only the substate it needs. On
+every query the `DiffEngine` reads raw samples from the same `SampleStore` the
+consumer writes to, diffs them on the fly (R41), applies its `ArcSwap`
+suppression rules inline (R42), aggregates counts, and classifies — nothing is
+precomputed, so a result is always derived from the current samples and the
+current rules/thresholds. A minimal Alpine.js dashboard is served at `GET /`
+(HTML + vendored Alpine embedded via `include_str!`, no build step) and drives
+that same read API, including a panel that edits suppression rules live (R34).
 
 ```mermaid
 flowchart LR
     operator(["Operator / Prometheus"]) --> admin
 
     subgraph admin ["Admin server — axum on server.admin-port, admin_router (src/http/router.rs, R24/R29/R33)"]
-        ui["GET / + /alpine.js<br/>embedded Alpine.js dashboard, no build step;<br/>consumes the JSON query API (R34)<br/>(src/http/ui.rs, ui/index.html)"]
+        ui["GET / + /alpine.js<br/>embedded Alpine.js dashboard, no build step;<br/>diff views + live suppression-rule editor (R34/R42)<br/>(src/http/ui.rs, ui/index.html)"]
         hz["GET /healthz → 204"]
         mx["GET /metrics → PrometheusHandle.render<br/>empty body when metrics.enabled=false<br/>(src/http/metrics.rs, R39)"]
         paths["GET /diffs/paths[?endpoint=]<br/>endpoints → diffing field paths<br/>(src/http/query.rs)"]
-        detail["GET /diffs/detail?endpoint=&path=<br/>raw counts + paginated samples;<br/>per-endpoint classifier applied at read time (R31/R33)<br/>(src/http/query.rs)"]
-        reset["DELETE /diffs?endpoint=<br/>clear an endpoint's aggregation + live buffer (R33)<br/>(src/http/query.rs)"]
+        detail["GET /diffs/detail?endpoint=&path=<br/>counts + verdict + paginated samples,<br/>all diffed at read time (R41)<br/>(src/http/query.rs)"]
+        reset["DELETE /diffs?endpoint=<br/>drop an endpoint's stored samples (R43)<br/>(src/http/query.rs)"]
+        suppress["GET/PUT/DELETE /suppress?endpoint=<br/>read/replace/clear an endpoint's suppression rules;<br/>swaps DiffEngine.ArcSwap, live (R42)<br/>(src/http/query.rs)"]
         ups["GET /upstreams<br/>scheme-normalized baseline/candidate/control bases;<br/>UI substitutes them for $RIFFY_TARGET in a captured curl (R38)<br/>(src/http/query.rs)"]
     end
 
-    paths -. "get/list_aggregations" .-> readstore
-    detail -. "get_aggregation + recent_samples" .-> readstore
-    reset -. "reset_aggregation + counters.reset_endpoint" .-> readstore
-    readstore[("DiffStore read side (R29)<br/>HGETALL / SCAN / XREVRANGE / DEL")]
+    paths -. "list_endpoints + fetch_samples + engine.aggregate" .-> engine
+    detail -. "fetch_samples + engine.detail" .-> engine
+    reset -. "delete_endpoint" .-> readstore
+    suppress -. "engine.rules / set_suppress" .-> engine
+
+    engine[["DiffEngine (src/analysis/engine.rs, R41/R42)<br/>diff_sample (inline suppression) → aggregate → classify<br/>ArcSwap&lt;SuppressRules&gt; + EndpointClassifiers"]]
+    engine -. "fetch_samples / list_endpoints" .-> readstore
+    readstore[("SampleStore read side (R43)<br/>XREVRANGE / SMEMBERS, window-filtered")]
 ```
 
-The store persists **raw counts only** (R31); `is_regression` and the
-relative/absolute percentages are derived in `diff_detail` at read time. Each
-configured endpoint may carry its own thresholds, so the classifier is looked
-up per endpoint via `EndpointClassifiers` (held in `AdminState`), falling back
-to the diffy defaults for unmatched endpoints (R33); changing a threshold
-reclassifies everything instantly with no re-flush. The reserved `:status`
-field (an HTTP status divergence, R36) bypasses the percentage thresholds — it
-is flagged whenever raw > noise. Read methods on `DiffStore` (analysis-side
-only, never the hot path) sum the **retention window** (R37): `get_aggregation`
-(pipelined HGETALL over the endpoint's recent bucket keys
-`riffy:agg:{endpoint}:{bucket}`, merged), `list_aggregations` (SMEMBERS the
-endpoint index set, then sum each), `recent_samples` (paged, newest-first
-XREVRANGE over `riffy:diffs`, filtered to one endpoint + field path,
-`offset`/`limit` paginated), `reset_aggregation` (SCAN+DEL the endpoint's bucket
-keys + SREM the index).
+For each sample the engine reproduces the status-before-body rule (R23): a
+candidate/control whose status differs from baseline is reported as a `:status`
+divergence (`STATUS_FIELD`, R36) and its body is never compared; a same-status
+upstream is diffed via `flatten_value` (`src/compare/`) into dot-paths
+(raw = baseline vs candidate, noise = baseline vs control); a failed upstream
+(status `None`) contributes nothing. Suppression is applied **while** computing
+each diff — `diffs.retain(|path| !rules.is_suppressed(endpoint, path))` — so a
+suppressed path is never counted or shown (R42). Counts are then summed across
+the windowed samples and the verdict is computed per endpoint via
+`EndpointClassifiers` (held inside the engine), falling back to the diffy
+defaults for unmatched endpoints (R33); changing a threshold reclassifies
+everything on the next read with no re-flush. The reserved `:status` field
+bypasses the percentage thresholds — it is flagged whenever raw > noise (R36).
 
 | Query route | Response |
 |-------------|----------|
-| `GET /diffs/paths` | `{ "endpoints": [ { endpoint, total, paths[], last_updated } ] }`, sorted by endpoint |
-| `GET /diffs/paths?endpoint=<ep>` | one `{ endpoint, total, paths[], last_updated }`; 404 if unknown |
-| `GET /diffs/detail?endpoint=&path=` | `{ endpoint, path, total, raw_count, noise_count, is_regression, relative_difference, absolute_difference, last_updated, samples }` (`is_regression`/percentages computed at read time from the stored counts); `samples = { items[], limit, offset, has_more }`, newest-first; 404 if nothing recorded for that endpoint+path. `limit` default 20 / max 100 |
-| `DELETE /diffs?endpoint=<ep>` | clears the endpoint's stored aggregation counts and its live counter buffer; `204` on success, `404` if the endpoint has no recorded statistics. Samples age out via the stream cap, not purged here (R33) |
-| `GET /upstreams` | `{ baseline, candidate, control }` — scheme-normalized upstream base URLs, so the dashboard can replace the `$RIFFY_TARGET` placeholder in a captured curl with the chosen upstream (R38) |
+| `GET /diffs/paths` | `{ "endpoints": [ { endpoint, total, paths[], last_updated } ] }`, sorted by endpoint; each is one endpoint's samples aggregated at read time |
+| `GET /diffs/paths?endpoint=<ep>` | one `{ endpoint, total, paths[], last_updated }`; 404 if the endpoint has no samples |
+| `GET /diffs/detail?endpoint=&path=` | `{ endpoint, path, total, raw_count, noise_count, is_regression, relative_difference, absolute_difference, last_updated, samples }` — all derived from the raw samples at read time; `samples = { items[], limit, offset, has_more }`, newest-first; 404 if the endpoint has no samples, or if the path never diffs at offset 0. `limit` default 20 / max 100 |
+| `DELETE /diffs?endpoint=<ep>` | drops the endpoint's stored samples (stream + index); `204` on success, `404` if the endpoint has no samples (R43) |
+| `GET /suppress[?endpoint=]` | `{ endpoint, paths[] }` for one endpoint, or `{ "rules": { endpoint: paths[] } }` for all (R42) |
+| `PUT /suppress?endpoint=` | body `{ "paths": [...] }`; replaces that endpoint's rules and returns `{ endpoint, paths }`; effective on the next query (R42) |
+| `DELETE /suppress?endpoint=` | clears that endpoint's rules; `204` (R42) |
+| `GET /upstreams` | `{ baseline, candidate, control }` — scheme-normalized upstream base URLs (R38) |
 
-Each `DiffSample` in `/diffs/detail` additionally carries `request_curl` (a
-replayable curl with a `$RIFFY_TARGET` placeholder host), present only when the
-endpoint enabled `capture_request_curl` (R38).
+Each `DiffSample` in `/diffs/detail` carries the per-sample `raw`/`noise`
+`FieldDiff` at the queried path plus `request_curl` (a replayable curl with a
+`$RIFFY_TARGET` placeholder host), present only when the endpoint enabled
+`capture_request_curl` (R38).
 
 Each metric is **defined in the module that emits it** (R39); the shared
 drop-guard timing primitive (`GuardedTimer`, used by the proxy and upstream
@@ -149,17 +154,14 @@ installs the global recorder.
 | `riffy_proxy_request_total` | method, endpoint, status (HTTP code or `cancelled`) | `src/http/metrics.rs`, via the `track_proxy` middleware |
 | `riffy_proxy_request_duration_seconds` | method, endpoint | `src/http/metrics.rs`, via the `track_proxy` middleware |
 | `riffy_upstream_request_duration_seconds` | upstream (baseline/candidate/control), endpoint, outcome (`ok`/`error`/`cancelled`) | `src/upstream/metrics.rs`, started in `forward` + its background task |
-| `riffy_diff_pipeline_lag_seconds` | — | `src/pipeline/metrics.rs`, called by the consumer after a diff entry is stored |
-| `riffy_diff_fields_total` | endpoint, diff_type (raw/noise) | `src/pipeline/metrics.rs`, called by the consumer after a diff entry is stored |
+| `riffy_sample_store_lag_seconds` | — | `src/pipeline/metrics.rs`, called by the consumer after a sample is stored |
+| `riffy_samples_stored_total` | endpoint | `src/pipeline/metrics.rs`, called by the consumer after a sample is stored |
 
 Request and upstream timings are recorded by the shared **`GuardedTimer`** drop
 guard (R21, `src/telemetry/timer.rs`): when a future is dropped at an `.await`
 (client disconnect, shutdown, panic unwind), the timer's `Drop` impl records the
-sample with the `cancelled` outcome (surfaced as `status="cancelled"` /
-`outcome="cancelled"` by each module's `record` closure) instead of losing it. Duration histograms therefore
-include abandoned requests (time until abandonment) and carry no survivorship
-bias. Consumer-side metrics need no guard — they run in a detached task that
-client cancellation cannot drop.
+sample with the `cancelled` outcome instead of losing it. Consumer-side metrics
+need no guard — they run in a detached task that client cancellation cannot drop.
 
 **Trace export (R33):** when `logging.otlp.enabled` (off by default), spans are
 exported to a Jaeger collector over OTLP/HTTP (`logging.otlp.endpoint`, default
@@ -168,67 +170,57 @@ subscriber. The batch exporter reuses reqwest/rustls and is flushed on shutdown.
 
 ## Data written to Redis
 
-The stream and aggregation **keys are fixed constants** — `storage::DIFF_STREAM_KEY`
-(`riffy:diffs`) and `storage::AGGREGATION_KEY_PREFIX` (`riffy:agg`), not config
-(R33). The backend (Redis vs in-memory), the `aggregation-interval`, and the
-`stream-cap` come from the `storage` config section.
+The sample stream **key prefix is a fixed constant** — `storage::SAMPLE_KEY_PREFIX`
+(`riffy:samples`), not config (R33). Each endpoint gets its own stream
+`riffy:samples:{endpoint}`; an index set (`riffy:samples:__endpoints__`) tracks
+endpoints for listing. The backend (Redis vs in-memory), the `sample-cap`, the
+`window`, and `max-body-bytes` come from the `storage` config section.
 
-**Stream entry** (`XADD MAXLEN ~ riffy:diffs`, trimmed to `storage.stream-cap`),
-one per request that produced diffs or a status mismatch:
+**Sample entry** (`XADD MAXLEN ~ riffy:samples:{endpoint}`, trimmed to
+`storage.sample-cap` *per endpoint*; the stream key is `EXPIRE`d to
+`storage.window` so an endpoint that stops receiving traffic ages out), one per
+sampled request (R43):
 
 | Field | Content |
 |-------|---------|
-| `endpoint` | resolved template (e.g. `/api/v1/users/:id`); unregistered paths are not analyzed (R35) |
-| `timestamp` | RFC 3339 |
-| `raw_fields` / `noise_fields` | JSON: `{ "<dot.path>": { "left"?, "right"?, "diff_type" } }` |
+| `timestamp` | RFC 3339; read-time queries ignore samples older than `storage.window` |
 | `baseline_status` | always present |
+| `baseline_body` | decoded baseline JSON text; a non-JSON or over-`max-body-bytes` baseline means **no sample is stored** (R44) |
 | `candidate_status` / `control_status` | omitted when that upstream failed |
-| `request_curl` | replayable curl for the originating request (method, headers, body) with a `$RIFFY_TARGET` placeholder host; present only when the endpoint set `capture_request_curl`. Credential header values (`authorization`, `cookie`, …) are redacted unless `store_credentials_header`; `host`/`content-length`/hop-by-hop are dropped; bodies are inlined up to 64 KiB, else omitted with a comment; all values are POSIX shell-quoted via `shell-escape` (R38) |
+| `candidate_body` / `control_body` | decoded JSON text, present **only** when that upstream answered baseline's status with a JSON body within `max-body-bytes` (R41) |
+| `request_curl` | replayable curl for the originating request with a `$RIFFY_TARGET` placeholder host; present only when the endpoint set `capture_request_curl`. Credential header values (`authorization`, `cookie`, …) are redacted unless `store_credentials_header`; `host`/`content-length`/hop-by-hop are dropped; bodies are inlined up to 64 KiB, else omitted with a comment; all values are POSIX shell-quoted via `shell-escape` (R38) |
 
-`diff_type` is one of `primitive`, `missing_field`, `extra_field`, `seq_size`,
-`ordering`, `type_mismatch`, `status_mismatch` (`src/compare/flatten.rs`). A
-`status_mismatch` rides the reserved `:status` field path (R36).
-
-**Aggregation buckets** (`riffy:agg:{endpoint}:{bucket}`, one hash per time
-bucket), counts incremented with `HINCRBY` so concurrent instances sum into the
-same bucket; each bucket has a TTL of `window + bucket` so old data ages out
-(R32/R37). An index set (`riffy:agg:__endpoints__`) tracks endpoints for
-listing. Reads sum the buckets within `storage.window`:
-
-| Field | Content |
-|-------|---------|
-| `total` | requests analyzed for this endpoint in the bucket |
-| `raw:{dot.path}` | baseline-vs-candidate diff count at that path |
-| `noise:{dot.path}` | baseline-vs-control diff count at that path |
-| `last_updated` | RFC 3339 (last write to the bucket) |
-
-Per-field counts are flat hash entries (not a JSON blob) so `HINCRBY` can target
-them atomically; `is_regression` and the relative/absolute percentages are
-derived at read time (R31), never stored. The verdict therefore reflects only
-the most recent `storage.window` of traffic (R37).
+There are **no aggregation buckets** (the previous `riffy:agg:*` hashes,
+`HINCRBY`, and `LiveCounters` are gone, R41). Diff types (`primitive`,
+`missing_field`, `extra_field`, `seq_size`, `ordering`, `type_mismatch`,
+`status_mismatch`) and `is_regression`/percentages are computed at read time from
+the raw samples, never stored. `diff_type` is defined in
+`src/compare/flatten.rs`; a `status_mismatch` rides the reserved `:status` field
+path (R36).
 
 ## Invariants (do not regress)
 
 1. **Hot path is sacred (R2):** nothing between "request received" and "baseline
    response returned" may block on, wait for, or compute analysis. Candidate
-   and control calls, decoding, diffing, and Redis I/O all live behind
-   `tokio::spawn` + the mpsc channel. Request capture (R38) is no exception: the
-   `RequestSnapshot` is assembled inside the background task (reusing values
-   already cloned for the fan-out) and the curl string is rendered in the
-   consumer, only for diffs that are stored.
+   and control calls, body decoding, sample storage, and all diffing live behind
+   `tokio::spawn` + the mpsc channel (background) or behind the admin query API
+   (read time).
 2. **The client always receives the baseline response (Q13/R3).** There is no
    response-mode configuration.
 3. **Mutating methods (POST/PUT/PATCH/DELETE) are blocked before any upstream
    is contacted** unless `proxy.allow-http-side-effects` is set (Q11).
-4. **A failed candidate/control must not poison counters:** absent or
-   unparseable bodies contribute empty diff maps; an unparseable baseline skips
-   the request entirely (not counted in totals).
-   Statuses are checked before bodies (R23): a candidate/control that
-   answered with a different status than baseline is reported as a status
-   mismatch directly — its body is never decoded or compared.
-5. **Backpressure sheds load, it never queues unbounded:** a full analysis
+4. **The producer only records raw data (R41):** sampling decision +
+   `append_sample`. Diffing, suppression, detection, and aggregation happen
+   exclusively at read time in the `DiffEngine`. A non-JSON or over-cap baseline
+   skips the sample entirely; a candidate/control body is stored only when it
+   answered baseline's status with JSON within the cap.
+5. **Suppression is applied during the diff and is runtime-writable (R42):** the
+   `DiffEngine` holds rules in an `ArcSwap<SuppressRules>`, seeded from config and
+   replaced wholesale by `/suppress`; a suppressed path is never counted or shown,
+   and edits take effect on the next query with no restart.
+6. **Backpressure sheds load, it never queues unbounded:** a full analysis
    channel drops the newest message with a warning (R12).
-6. **Every tracked request/upstream call is recorded exactly once (R21):**
+7. **Every tracked request/upstream call is recorded exactly once (R21):**
    completion records the real status/outcome; cancellation records
    `cancelled` via the guard's `Drop`. No code path may silently skip a
    metric sample.

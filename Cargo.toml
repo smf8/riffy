@@ -45,6 +45,8 @@ redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 # Concurrency
 dashmap = "6"
 rand = "0.9"
+# Lock-free atomic swap for runtime-writable suppression rules (read side only).
+arc-swap = "1"
 
 # Error handling
 anyhow = "1"

@@ -1,8 +1,7 @@
-use crate::analysis::classify::RegressionClassifier;
-use crate::storage::FieldAggregation;
+use crate::analysis::classify::{FieldCounts, RegressionClassifier};
 
-fn field(raw: u64, noise: u64) -> FieldAggregation {
-    FieldAggregation {
+fn field(raw: u64, noise: u64) -> FieldCounts {
+    FieldCounts {
         raw_count: raw,
         noise_count: noise,
     }

@@ -37,10 +37,9 @@ fn embedded_defaults_fill_omitted_sections() {
     assert_eq!(cfg.server.proxy_port, 7677);
     assert_eq!(cfg.server.admin_port, 7678);
     assert_eq!(cfg.pipeline.channel_capacity, 1024);
-    assert_eq!(cfg.storage.stream_cap, 10_000);
-    assert_eq!(cfg.storage.aggregation_interval, Duration::from_secs(1));
+    assert_eq!(cfg.storage.sample_cap, 10_000);
     assert_eq!(cfg.storage.window, Duration::from_secs(3600));
-    assert_eq!(cfg.storage.bucket, Duration::from_secs(60));
+    assert_eq!(cfg.storage.max_body_bytes, 262_144);
     assert!(matches!(cfg.storage.backend, StorageBackend::InMemory));
     assert_eq!(cfg.upstream.timeout, Duration::from_secs(30));
     assert!(!cfg.proxy.allow_http_side_effects);
@@ -59,11 +58,12 @@ fn embedded_defaults_fill_omitted_sections() {
 #[test]
 fn partial_storage_override_keeps_other_defaults() {
     // Override only one storage field; the rest must deep-merge from defaults.
-    let yaml = format!("{MINIMAL_YAML}\nstorage:\n  aggregation_interval: 9s\n");
+    let yaml = format!("{MINIMAL_YAML}\nstorage:\n  max_body_bytes: 99\n");
     let cfg = parse(&yaml);
 
-    assert_eq!(cfg.storage.aggregation_interval, Duration::from_secs(9));
-    assert_eq!(cfg.storage.stream_cap, 10_000);
+    assert_eq!(cfg.storage.max_body_bytes, 99);
+    assert_eq!(cfg.storage.sample_cap, 10_000);
+    assert_eq!(cfg.storage.window, Duration::from_secs(3600));
     assert!(matches!(cfg.storage.backend, StorageBackend::InMemory));
 }
 
@@ -80,8 +80,8 @@ endpoints:
       relative: 50.0
       absolute: 0.1
 storage:
-  aggregation_interval: 5s
-  stream_cap: 500
+  sample_cap: 500
+  window: 30m
   backend:
     type: redis
     uri: "redis://example:6379"
@@ -92,8 +92,8 @@ storage:
         StorageBackend::Redis { ref uri } => assert_eq!(uri, "redis://example:6379"),
         other => panic!("expected redis backend, got {other:?}"),
     }
-    assert_eq!(cfg.storage.aggregation_interval, Duration::from_secs(5));
-    assert_eq!(cfg.storage.stream_cap, 500);
+    assert_eq!(cfg.storage.window, Duration::from_secs(1800));
+    assert_eq!(cfg.storage.sample_cap, 500);
 
     // The explicit per-endpoint threshold overrides the diffy defaults.
     assert_eq!(cfg.endpoints[0].threshold.relative, 50.0);

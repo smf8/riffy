@@ -1,12 +1,11 @@
 use super::query::UpstreamTargets;
 use super::{forward, query, ui};
-use crate::analysis::classify::EndpointClassifiers;
-use crate::analysis::counters::LiveCounters;
+use crate::analysis::engine::DiffEngine;
 use crate::config::Riffy;
 use crate::endpoint::EndpointMatcher;
 use crate::http::metrics::{endpoint_metric_middleware, render_metrics};
 use crate::pipeline::AnalysisMessage;
-use crate::storage::DiffStore;
+use crate::storage::SampleStore;
 use crate::upstream::client::UpstreamClient;
 use axum::extract::FromRef;
 use axum::routing::{any, delete, get};
@@ -36,9 +35,8 @@ pub fn create_router(state: AppState) -> Router {
 #[derive(Clone)]
 pub struct AdminState {
     pub metrics: Option<PrometheusHandle>,
-    pub store: Arc<dyn DiffStore>,
-    pub classifiers: Arc<EndpointClassifiers>,
-    pub counters: Arc<LiveCounters>,
+    pub store: Arc<dyn SampleStore>,
+    pub engine: Arc<DiffEngine>,
     pub upstreams: Arc<UpstreamTargets>,
 }
 
@@ -48,21 +46,15 @@ impl FromRef<AdminState> for Option<PrometheusHandle> {
     }
 }
 
-impl FromRef<AdminState> for Arc<dyn DiffStore> {
+impl FromRef<AdminState> for Arc<dyn SampleStore> {
     fn from_ref(state: &AdminState) -> Self {
         state.store.clone()
     }
 }
 
-impl FromRef<AdminState> for Arc<EndpointClassifiers> {
+impl FromRef<AdminState> for Arc<DiffEngine> {
     fn from_ref(state: &AdminState) -> Self {
-        state.classifiers.clone()
-    }
-}
-
-impl FromRef<AdminState> for Arc<LiveCounters> {
-    fn from_ref(state: &AdminState) -> Self {
-        state.counters.clone()
+        state.engine.clone()
     }
 }
 
@@ -81,6 +73,12 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/diffs/paths", get(query::list_paths))
         .route("/diffs/detail", get(query::diff_detail))
         .route("/diffs", delete(query::reset_stats))
+        .route(
+            "/suppress",
+            get(query::list_suppress)
+                .put(query::put_suppress)
+                .delete(query::delete_suppress),
+        )
         .route("/upstreams", get(query::upstreams))
         .with_state(state)
 }

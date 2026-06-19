@@ -1,38 +1,31 @@
-use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use super::error::StoreError;
-use super::{
-    current_bucket, merge_aggregation, window_bucket_count, DiffEntry, DiffSample, DiffStore,
-    EndpointAggregation, FieldAggregation, SamplePage, AGGREGATION_KEY_PREFIX, DIFF_STREAM_KEY,
-};
-use crate::compare::flatten::FieldDiff;
-
-/// Redis set tracking every endpoint with stored aggregation buckets,
-/// so list_aggregations can enumerate endpoints without scanning the keyspace.
-const ENDPOINTS_INDEX: &str = "riffy:agg:__endpoints__";
-
-fn bucket_key(endpoint: &str, bucket: u64) -> String {
-    format!("{AGGREGATION_KEY_PREFIX}:{endpoint}:{bucket}")
-}
+use super::{RawSample, SampleStore, SAMPLE_KEY_PREFIX};
 use chrono::{DateTime, Utc};
 use redis::aio::ConnectionManager;
 use redis::streams::{StreamId, StreamMaxlen, StreamRangeReply};
 use redis::{from_redis_value, AsyncCommands, Value};
 
-pub struct RedisDiffStore {
+/// Redis set tracking every endpoint with a sample stream, so `list_endpoints`
+/// can enumerate them without scanning the keyspace.
+const ENDPOINTS_INDEX: &str = "riffy:samples:__endpoints__";
+
+fn stream_key(endpoint: &str) -> String {
+    format!("{SAMPLE_KEY_PREFIX}:{endpoint}")
+}
+
+pub struct RedisSampleStore {
     conn: ConnectionManager,
-    /// Approximate cap on the diff stream length (`XADD MAXLEN ~`).
-    stream_cap: usize,
-    bucket_secs: u64,
+    /// Approximate cap on each endpoint's stream length (`XADD MAXLEN ~`).
+    sample_cap: usize,
     window_secs: u64,
 }
 
-impl RedisDiffStore {
+impl RedisSampleStore {
     pub async fn connect(
         uri: &str,
-        stream_cap: usize,
-        bucket: Duration,
+        sample_cap: usize,
         window: Duration,
     ) -> Result<Self, StoreError> {
         let client = redis::Client::open(uri).map_err(StoreError::Redis)?;
@@ -42,347 +35,147 @@ impl RedisDiffStore {
 
         Ok(Self {
             conn,
-            stream_cap,
-            bucket_secs: bucket.as_secs().max(1),
+            sample_cap: sample_cap.max(1),
             window_secs: window.as_secs().max(1),
         })
     }
 }
 
 #[async_trait::async_trait]
-impl DiffStore for RedisDiffStore {
-    async fn append_diff(&self, entry: &DiffEntry) -> Result<(), StoreError> {
-        let raw_json = serde_json::to_string(&entry.raw_fields).map_err(StoreError::Serialize)?;
-        let noise_json =
-            serde_json::to_string(&entry.noise_fields).map_err(StoreError::Serialize)?;
-
+impl SampleStore for RedisSampleStore {
+    async fn append_sample(&self, sample: &RawSample) -> Result<(), StoreError> {
         let mut fields: Vec<(&str, String)> = vec![
-            ("endpoint", entry.endpoint.clone()),
-            ("timestamp", entry.timestamp.to_rfc3339()),
-            ("raw_fields", raw_json),
-            ("noise_fields", noise_json),
-            ("baseline_status", entry.baseline_status.to_string()),
+            ("timestamp", sample.timestamp.to_rfc3339()),
+            ("baseline_status", sample.baseline_status.to_string()),
+            ("baseline_body", sample.baseline_body.clone()),
         ];
-        if let Some(status) = entry.candidate_status {
+        if let Some(status) = sample.candidate_status {
             fields.push(("candidate_status", status.to_string()));
         }
-        if let Some(status) = entry.control_status {
+        if let Some(body) = &sample.candidate_body {
+            fields.push(("candidate_body", body.clone()));
+        }
+        if let Some(status) = sample.control_status {
             fields.push(("control_status", status.to_string()));
         }
-        if let Some(curl) = &entry.request_curl {
+        if let Some(body) = &sample.control_body {
+            fields.push(("control_body", body.clone()));
+        }
+        if let Some(curl) = &sample.request_curl {
             fields.push(("request_curl", curl.clone()));
         }
 
+        let key = stream_key(&sample.endpoint);
         // Approximate trimming (`~`) lets Redis trim whole macro-nodes, far cheaper
-        // than exact trimming on every append.
-        let mut conn = self.conn.clone();
-        let _id: String = conn
-            .xadd_maxlen(
-                DIFF_STREAM_KEY,
-                StreamMaxlen::Approx(self.stream_cap),
-                "*",
-                &fields,
-            )
-            .await
-            .map_err(StoreError::Redis)?;
-
-        Ok(())
-    }
-
-    async fn add_aggregation(&self, deltas: &[EndpointAggregation]) -> Result<(), StoreError> {
-        if deltas.is_empty() {
-            return Ok(());
-        }
-
-        // HINCRBY so concurrent instances sum into the same bucket instead of overwriting.
-        // Each bucket gets a TTL (window + one bucket) so old data ages out.
-        // Wrapped in MULTI/EXEC (pipe.atomic()) so a reader never sees a half-applied flush.
-        let now = chrono::Utc::now();
-        let bucket = current_bucket(self.bucket_secs);
-        let ttl = (self.window_secs + self.bucket_secs) as i64;
-
+        // than exact trimming on every append. EXPIRE ages out idle endpoints whose
+        // samples have all fallen out of the window.
         let mut pipe = redis::pipe();
-        pipe.atomic();
-        for delta in deltas {
-            let key = bucket_key(&delta.endpoint, bucket);
-            if delta.total > 0 {
-                pipe.hincr(&key, "total", delta.total).ignore();
-            }
-            for (path, field) in &delta.fields {
-                if field.raw_count > 0 {
-                    pipe.hincr(&key, format!("raw:{path}"), field.raw_count)
-                        .ignore();
-                }
-                if field.noise_count > 0 {
-                    pipe.hincr(&key, format!("noise:{path}"), field.noise_count)
-                        .ignore();
-                }
-            }
-            pipe.hset(&key, "last_updated", now.to_rfc3339()).ignore();
-            pipe.expire(&key, ttl).ignore();
-            pipe.sadd(ENDPOINTS_INDEX, &delta.endpoint).ignore();
-        }
+        pipe.xadd_maxlen(&key, StreamMaxlen::Approx(self.sample_cap), "*", &fields)
+            .ignore();
+        pipe.expire(&key, self.window_secs as i64).ignore();
+        pipe.sadd(ENDPOINTS_INDEX, &sample.endpoint).ignore();
 
         let mut conn = self.conn.clone();
         let _: () = pipe
             .query_async(&mut conn)
             .await
             .map_err(StoreError::Redis)?;
-
         Ok(())
     }
 
-    async fn get_aggregation(
-        &self,
-        endpoint: &str,
-    ) -> Result<Option<EndpointAggregation>, StoreError> {
-        let current = current_bucket(self.bucket_secs);
-        let count = window_bucket_count(self.window_secs, self.bucket_secs);
-
+    async fn fetch_samples(&self, endpoint: &str) -> Result<Vec<RawSample>, StoreError> {
         let mut conn = self.conn.clone();
-        let mut pipe = redis::pipe();
-        for i in 0..count {
-            pipe.hgetall(bucket_key(endpoint, current.saturating_sub(i)));
-        }
-        let maps: Vec<HashMap<String, String>> = pipe
-            .query_async(&mut conn)
+        let reply: StreamRangeReply = conn
+            .xrevrange_count(stream_key(endpoint), "+", "-", self.sample_cap)
             .await
             .map_err(StoreError::Redis)?;
 
-        let mut acc = None;
-        for map in maps {
-            if map.is_empty() {
-                continue;
-            }
-            merge_aggregation(&mut acc, parse_aggregation(endpoint.to_owned(), &map)?);
-        }
-        Ok(acc)
-    }
-
-    async fn list_aggregations(&self) -> Result<Vec<EndpointAggregation>, StoreError> {
-        let mut conn = self.conn.clone();
-        let endpoints: Vec<String> = conn
-            .smembers(ENDPOINTS_INDEX)
-            .await
-            .map_err(StoreError::Redis)?;
-
-        let mut out = Vec::new();
-        for endpoint in endpoints {
-            if let Some(agg) = self.get_aggregation(&endpoint).await? {
-                out.push(agg);
+        let now = Utc::now();
+        let mut out = Vec::with_capacity(reply.ids.len());
+        for entry in &reply.ids {
+            let sample = sample_from_entry(entry, endpoint)?;
+            if now.signed_duration_since(sample.timestamp).num_seconds() <= self.window_secs as i64
+            {
+                out.push(sample);
             }
         }
         Ok(out)
     }
 
-    async fn reset_aggregation(&self, endpoint: &str) -> Result<(), StoreError> {
+    async fn list_endpoints(&self) -> Result<Vec<String>, StoreError> {
         let mut conn = self.conn.clone();
+        conn.smembers(ENDPOINTS_INDEX)
+            .await
+            .map_err(StoreError::Redis)
+    }
 
-        // SCAN instead of KEYS — safe under load, no blocking keyspace scan.
-        let pattern = format!("{AGGREGATION_KEY_PREFIX}:{endpoint}:*");
-        let mut cursor: u64 = 0;
-        let mut keys: HashSet<String> = HashSet::new();
-        loop {
-            let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(256)
-                .query_async(&mut conn)
-                .await
-                .map_err(StoreError::Redis)?;
-            keys.extend(batch);
-            cursor = next;
-            if cursor == 0 {
-                break;
-            }
-        }
-
-        if !keys.is_empty() {
-            let mut pipe = redis::pipe();
-            for key in &keys {
-                pipe.del(key).ignore();
-            }
-            let _: () = pipe
-                .query_async(&mut conn)
-                .await
-                .map_err(StoreError::Redis)?;
-        }
-
-        let _: () = conn
-            .srem(ENDPOINTS_INDEX, endpoint)
+    async fn delete_endpoint(&self, endpoint: &str) -> Result<(), StoreError> {
+        let mut conn = self.conn.clone();
+        let mut pipe = redis::pipe();
+        pipe.del(stream_key(endpoint)).ignore();
+        pipe.srem(ENDPOINTS_INDEX, endpoint).ignore();
+        let _: () = pipe
+            .query_async(&mut conn)
             .await
             .map_err(StoreError::Redis)?;
         Ok(())
     }
-
-    async fn recent_samples(
-        &self,
-        endpoint: &str,
-        path: &str,
-        limit: usize,
-        offset: usize,
-    ) -> Result<SamplePage, StoreError> {
-        // Scan newest-first in pages, collecting one extra sample so `has_more` is
-        // known without a second query. The stream is shared across endpoints, so
-        // non-matching entries are filtered here.
-        const PAGE: usize = 256;
-        let want = offset.saturating_add(limit).saturating_add(1);
-        let mut conn = self.conn.clone();
-        let mut matches: Vec<DiffSample> = Vec::new();
-        let mut end = "+".to_string();
-
-        loop {
-            let reply: StreamRangeReply = conn
-                .xrevrange_count(DIFF_STREAM_KEY, end.as_str(), "-", PAGE)
-                .await
-                .map_err(StoreError::Redis)?;
-            if reply.ids.is_empty() {
-                break;
-            }
-            let batch_len = reply.ids.len();
-            let oldest_id = reply.ids.last().map(|entry| entry.id.clone());
-
-            for entry in &reply.ids {
-                if let Some(sample) = sample_from_entry(entry, endpoint, path)? {
-                    matches.push(sample);
-                    if matches.len() >= want {
-                        break;
-                    }
-                }
-            }
-
-            if matches.len() >= want || batch_len < PAGE {
-                break;
-            }
-            match oldest_id {
-                // `(` prefix = exclusive lower bound; continue strictly older than this id.
-                Some(id) => end = format!("({id}"),
-                None => break,
-            }
-        }
-
-        let has_more = matches.len() > offset.saturating_add(limit);
-        let items = matches.into_iter().skip(offset).take(limit).collect();
-        Ok(SamplePage {
-            items,
-            limit,
-            offset,
-            has_more,
-        })
-    }
 }
 
-/// `total` and `last_updated` are reserved keys; all others are
-/// `raw:{path}` / `noise:{path}` per-field counters regrouped by path.
-fn parse_aggregation(
-    endpoint: String,
-    map: &HashMap<String, String>,
-) -> Result<EndpointAggregation, StoreError> {
-    let mut total = 0u64;
-    let mut last_updated: Option<DateTime<Utc>> = None;
-    let mut fields: HashMap<String, FieldAggregation> = HashMap::new();
-
-    for (key, value) in map {
-        match key.as_str() {
-            "total" => {
-                total = value.parse::<u64>().map_err(|e| {
-                    StoreError::Corrupt(format!("aggregation '{endpoint}' invalid total: {e}"))
-                })?;
-            }
-            "last_updated" => {
-                last_updated = Some(
-                    DateTime::parse_from_rfc3339(value)
-                        .map_err(|e| {
-                            StoreError::Corrupt(format!(
-                                "aggregation '{endpoint}' invalid last_updated: {e}"
-                            ))
-                        })?
-                        .with_timezone(&Utc),
-                );
-            }
-            other => {
-                // Split on first ':' only; paths may contain ':' (e.g. `:status`).
-                let (kind, path) = match other.split_once(':') {
-                    Some(parts) => parts,
-                    None => continue,
-                };
-                let count = value.parse::<u64>().map_err(|e| {
-                    StoreError::Corrupt(format!(
-                        "aggregation '{endpoint}' field '{other}' invalid count: {e}"
-                    ))
-                })?;
-                let field = fields.entry(path.to_owned()).or_default();
-                match kind {
-                    "raw" => field.raw_count = count,
-                    "noise" => field.noise_count = count,
-                    _ => continue,
-                }
-            }
-        }
-    }
-
-    let last_updated = last_updated.ok_or_else(|| {
-        StoreError::Corrupt(format!("aggregation '{endpoint}' missing 'last_updated'"))
-    })?;
-
-    Ok(EndpointAggregation {
-        endpoint,
-        total,
-        fields,
-        last_updated,
-    })
-}
-
-fn sample_from_entry(
-    entry: &StreamId,
-    endpoint: &str,
-    path: &str,
-) -> Result<Option<DiffSample>, StoreError> {
-    if stream_field(&entry.map, "endpoint")?.as_deref() != Some(endpoint) {
-        return Ok(None);
-    }
-
-    let raw = diff_at_path(stream_field(&entry.map, "raw_fields")?.as_deref(), path)?;
-    let noise = diff_at_path(stream_field(&entry.map, "noise_fields")?.as_deref(), path)?;
-    if raw.is_none() && noise.is_none() {
-        return Ok(None);
-    }
-
+fn sample_from_entry(entry: &StreamId, endpoint: &str) -> Result<RawSample, StoreError> {
     let timestamp = match stream_field(&entry.map, "timestamp")? {
         Some(ts) => DateTime::parse_from_rfc3339(&ts)
             .map_err(|e| {
-                StoreError::Corrupt(format!("stream entry {} invalid timestamp: {e}", entry.id))
+                StoreError::Corrupt(format!("sample {} invalid timestamp: {e}", entry.id))
             })?
             .with_timezone(&Utc),
-        None => return Ok(None),
+        None => {
+            return Err(StoreError::Corrupt(format!(
+                "sample {} missing timestamp",
+                entry.id
+            )))
+        }
     };
 
-    let request_curl = stream_field(&entry.map, "request_curl")?;
+    let baseline_status =
+        parse_status(&entry.map, "baseline_status", &entry.id)?.ok_or_else(|| {
+            StoreError::Corrupt(format!("sample {} missing baseline_status", entry.id))
+        })?;
+    let baseline_body = stream_field(&entry.map, "baseline_body")?
+        .ok_or_else(|| StoreError::Corrupt(format!("sample {} missing baseline_body", entry.id)))?;
 
-    Ok(Some(DiffSample {
+    Ok(RawSample {
+        endpoint: endpoint.to_owned(),
         timestamp,
-        raw,
-        noise,
-        request_curl,
-    }))
+        baseline_status,
+        baseline_body,
+        candidate_status: parse_status(&entry.map, "candidate_status", &entry.id)?,
+        candidate_body: stream_field(&entry.map, "candidate_body")?,
+        control_status: parse_status(&entry.map, "control_status", &entry.id)?,
+        control_body: stream_field(&entry.map, "control_body")?,
+        request_curl: stream_field(&entry.map, "request_curl")?,
+    })
 }
 
-fn stream_field(map: &HashMap<String, Value>, name: &str) -> Result<Option<String>, StoreError> {
-    match map.get(name) {
-        Some(value) => Ok(Some(from_redis_value(value).map_err(StoreError::Redis)?)),
+fn parse_status(
+    map: &std::collections::HashMap<String, Value>,
+    name: &str,
+    id: &str,
+) -> Result<Option<u16>, StoreError> {
+    match stream_field(map, name)? {
+        Some(s) => Ok(Some(s.parse::<u16>().map_err(|e| {
+            StoreError::Corrupt(format!("sample {id} invalid {name}: {e}"))
+        })?)),
         None => Ok(None),
     }
 }
 
-fn diff_at_path(json: Option<&str>, path: &str) -> Result<Option<FieldDiff>, StoreError> {
-    match json {
-        Some(json) => {
-            let map: HashMap<String, FieldDiff> =
-                serde_json::from_str(json).map_err(StoreError::Deserialize)?;
-            Ok(map.get(path).cloned())
-        }
+fn stream_field(
+    map: &std::collections::HashMap<String, Value>,
+    name: &str,
+) -> Result<Option<String>, StoreError> {
+    match map.get(name) {
+        Some(value) => Ok(Some(from_redis_value(value).map_err(StoreError::Redis)?)),
         None => Ok(None),
     }
 }
