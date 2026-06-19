@@ -112,10 +112,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Prometheus exporter (admin /metrics renders empty when disabled)
     let metrics_handle = if cfg.metrics.enabled {
-        Some(
-            telemetry::metrics::install_prometheus()
-                .context("failed to install prometheus recorder")?,
-        )
+        Some(telemetry::install_prometheus().context("failed to install prometheus recorder")?)
     } else {
         None
     };

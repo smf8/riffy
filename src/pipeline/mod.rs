@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 pub mod consumer;
 pub mod curl;
 mod decode;
+pub mod metrics;
 
 #[cfg(test)]
 mod tests;

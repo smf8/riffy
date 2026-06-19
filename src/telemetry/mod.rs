@@ -7,10 +7,15 @@ use opentelemetry_sdk::trace::span_processor_with_async_runtime::BatchSpanProces
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 
-pub mod metrics;
+pub mod timer;
 
 #[cfg(test)]
 mod tests;
+
+/// Install the global Prometheus recorder. Must be called once at startup.
+pub fn install_prometheus() -> anyhow::Result<metrics_exporter_prometheus::PrometheusHandle> {
+    Ok(metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?)
+}
 
 /// Initialize the global tracing subscriber: JSON events, local-time
 /// timestamps, env-filterable levels with noisy HTTP internals capped at info.

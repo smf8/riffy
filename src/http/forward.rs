@@ -1,15 +1,17 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::error::AppError;
+use crate::http::metrics::{ResolvedEndpoint, UNMATCHED_ENDPOINT};
 use crate::http::router::AppState;
 use crate::pipeline::{AnalysisMessage, RequestSnapshot};
-use crate::telemetry::metrics::{ResolvedEndpoint, UpstreamTimer, UNMATCHED_ENDPOINT};
+use crate::upstream::client::UpstreamResponse;
+use crate::upstream::metrics::{outcome, request_timer};
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::Method;
+use axum::http::{HeaderMap, Method};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
-use std::sync::Arc;
 use tracing::Instrument;
 
 #[tracing::instrument(skip(state, endpoint, headers, body), fields(method = %method, path = %uri))]
@@ -24,18 +26,8 @@ pub async fn forward(
     let received_at = Instant::now();
     let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
-    // Side-effect safety check
-    if !state.config.proxy.allow_http_side_effects {
-        match method {
-            Method::POST | Method::PUT | Method::PATCH | Method::DELETE => {
-                tracing::warn!(method = %method, path = path_and_query, "blocked mutating method");
-                return Ok(axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response());
-            }
-            _ => {}
-        }
-    }
-
-    let path = uri.path();
+    // ── Reverse proxy hot path (the only work the client waits on) ──
+    // Forward to baseline, then hand its response straight back. Per the
 
     // Upstream-timer label: the matched template, or a single bucket for
     // unmatched paths (baseline is still proxied for those).
@@ -44,8 +36,7 @@ pub async fn forward(
         .clone()
         .unwrap_or_else(|| Arc::from(UNMATCHED_ENDPOINT));
 
-    // 1. Forward to baseline FIRST — blocking hot path, zero added latency
-    let baseline_timer = UpstreamTimer::start("baseline", endpoint_label.clone());
+    let baseline_timer = request_timer("baseline", endpoint_label);
     let baseline_result = state
         .upstream
         .send(
@@ -56,7 +47,7 @@ pub async fn forward(
             body.clone(),
         )
         .await;
-    baseline_timer.finish(baseline_result.is_ok());
+    baseline_timer.finish(outcome(baseline_result.is_ok()));
 
     let baseline_response = baseline_result.map_err(|e| {
         tracing::error!(error = %e, "baseline upstream failed");
@@ -69,7 +60,7 @@ pub async fn forward(
         "baseline response received"
     );
 
-    // 2. Build response to client from baseline — return immediately
+    // Build the client response from baseline and return it immediately.
     let mut builder = axum::http::Response::builder().status(baseline_response.status);
     for (name, value) in baseline_response.headers.iter() {
         builder = builder.header(name, value);
@@ -83,11 +74,64 @@ pub async fn forward(
                 .unwrap()
         });
 
-    // 3. Fire candidate + control in background for analysis — only for
-    //    registered endpoints. Unmatched paths are pure-proxied (baseline only):
-    //    no fan-out, no duplicate upstream load, no analysis.
+    // Side-effect safety: refuse mutating methods unless explicitly allowed.
+    if !state.config.proxy.allow_http_side_effects {
+        match method {
+            Method::POST | Method::PUT | Method::PATCH | Method::DELETE => {
+                tracing::warn!(method = %method, path = path_and_query, "blocked mutating method");
+                return Ok(axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response());
+            }
+            _ => {}
+        }
+    }
+
+    // ── Analysis dispatch (off the hot path) ──
+    // Fan out to candidate/control and queue the diff asynchronously. Returns
+    // immediately; the actual upstream calls and channel send run in a spawned
+    // task, so they never delay the response built above.
+    dispatch_analysis(
+        &state,
+        &endpoint,
+        Dispatch {
+            method,
+            path: uri.path().to_owned(),
+            path_and_query: path_and_query.to_owned(),
+            headers,
+            body,
+            received_at,
+            baseline_response,
+        },
+    );
+
+    Ok(client_response.into_response())
+}
+
+/// The proxied request plus its baseline outcome, owned so it can move into the
+/// background analysis task.
+struct Dispatch {
+    method: Method,
+    /// Raw request path; endpoint resolution happens in the consumer.
+    path: String,
+    /// Path plus query string, reused for the candidate/control calls and the
+    /// captured-curl URL.
+    path_and_query: String,
+    headers: HeaderMap,
+    body: Bytes,
+    received_at: Instant,
+    baseline_response: UpstreamResponse,
+}
+
+/// Fan out to the candidate and control upstreams and queue the resulting diff
+/// for the analysis pipeline — entirely off the proxy hot path. The upstream
+/// calls and the channel send run in a spawned task, so this returns at once.
+///
+/// Does nothing for unmatched paths (pure-proxied, baseline only) or for
+/// requests that fall outside the endpoint's sampling window.
+fn dispatch_analysis(state: &AppState, endpoint: &ResolvedEndpoint, req: Dispatch) {
+    // Only registered endpoints fan out. Unmatched paths are pure-proxied
+    // (baseline only): no duplicate upstream load, no analysis.
     let Some(endpoint_key) = endpoint.0.clone() else {
-        return Ok(client_response.into_response());
+        return;
     };
 
     // Resolve this endpoint's config once: the sample rate and the request-curl
@@ -103,7 +147,7 @@ pub async fn forward(
     // sample_rate=1.0 bypasses the RNG entirely.
     let sample_rate = ep_cfg.map(|e| e.sample_rate).unwrap_or(1.0);
     if sample_rate < 1.0 && rand::random::<f64>() >= sample_rate {
-        return Ok(client_response.into_response());
+        return;
     }
 
     let capture_request_curl = ep_cfg.map(|e| e.capture_request_curl).unwrap_or(false);
@@ -111,10 +155,16 @@ pub async fn forward(
 
     let upstream = state.upstream.clone();
     let analysis_tx = state.analysis_tx.clone();
-    let method_clone = method.clone();
-    let path_owned = path.to_string();
-    let path_and_query_owned = path_and_query.to_string();
-    let headers_clone = headers.clone();
+
+    let Dispatch {
+        method,
+        path,
+        path_and_query,
+        headers,
+        body,
+        received_at,
+        baseline_response,
+    } = req;
 
     let analysis_span = tracing::info_span!("analysis", endpoint = %endpoint_key);
 
@@ -124,32 +174,32 @@ pub async fn forward(
             let control_body = body.clone();
 
             let candidate_future = async {
-                let timer = UpstreamTimer::start("candidate", endpoint_key.clone());
+                let timer = request_timer("candidate", endpoint_key.clone());
                 let result = upstream
                     .send(
                         &upstream.candidate,
-                        &method_clone,
-                        &path_and_query_owned,
-                        &headers_clone,
+                        &method,
+                        &path_and_query,
+                        &headers,
                         candidate_body,
                     )
                     .await;
-                timer.finish(result.is_ok());
+                timer.finish(outcome(result.is_ok()));
                 result
             };
 
             let control_future = async {
-                let timer = UpstreamTimer::start("control", endpoint_key.clone());
+                let timer = request_timer("control", endpoint_key.clone());
                 let result = upstream
                     .send(
                         &upstream.control,
-                        &method_clone,
-                        &path_and_query_owned,
-                        &headers_clone,
+                        &method,
+                        &path_and_query,
+                        &headers,
                         control_body,
                     )
                     .await;
-                timer.finish(result.is_ok());
+                timer.finish(outcome(result.is_ok()));
                 result
             };
 
@@ -168,15 +218,15 @@ pub async fn forward(
             // string itself is rendered later in the consumer, only for diffs
             // that are stored.
             let request = capture_request_curl.then(move || RequestSnapshot {
-                method: method_clone,
-                path_and_query: path_and_query_owned,
-                headers: headers_clone,
+                method,
+                path_and_query,
+                headers,
                 body,
                 redact_credentials: !store_credentials_header,
             });
 
             let msg = AnalysisMessage {
-                path: path_owned,
+                path,
                 received_at,
                 baseline_response,
                 candidate_response: candidate_result.ok(),
@@ -192,6 +242,4 @@ pub async fn forward(
         }
         .instrument(analysis_span),
     );
-
-    Ok(client_response.into_response())
 }

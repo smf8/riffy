@@ -128,7 +128,7 @@ impl Consumer {
             tracing::warn!(error = %e, "failed to append diff entry");
         }
 
-        crate::telemetry::metrics::record_diff_published(
+        crate::pipeline::metrics::record_diff_published(
             &entry.endpoint,
             entry.raw_fields.len(),
             entry.noise_fields.len(),

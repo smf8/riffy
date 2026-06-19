@@ -21,7 +21,7 @@ flowchart TD
     client(["Client"]) --> mw
 
     subgraph proxyserver ["Proxy server — axum on server.proxy-port (src/http/router.rs, R24/R33)"]
-        mw["track_proxy middleware<br/>resolve endpoint template once (unmatched → endpoint=undefined, R35);<br/>drop-guard records count + duration<br/>exactly once — real status, or<br/>status=cancelled if dropped (R21)<br/>(src/telemetry/metrics.rs)"]
+        mw["track_proxy middleware<br/>resolve endpoint template once (unmatched → endpoint=undefined, R35);<br/>drop-guard records count + duration<br/>exactly once — real status, or<br/>status=cancelled if dropped (R21)<br/>(src/http/metrics.rs, R39)"]
         guard{"mutating method and<br/>allow-http-side-effects=false?<br/>(src/http/forward.rs)"}
         mw --> guard
     end
@@ -98,7 +98,7 @@ flowchart LR
     subgraph admin ["Admin server — axum on server.admin-port, admin_router (src/http/router.rs, R24/R29/R33)"]
         ui["GET / + /alpine.js<br/>embedded Alpine.js dashboard, no build step;<br/>consumes the JSON query API (R34)<br/>(src/http/ui.rs, ui/index.html)"]
         hz["GET /healthz → 204"]
-        mx["GET /metrics → PrometheusHandle.render<br/>empty body when metrics.enabled=false<br/>(src/telemetry/metrics.rs)"]
+        mx["GET /metrics → PrometheusHandle.render<br/>empty body when metrics.enabled=false<br/>(src/http/metrics.rs, R39)"]
         paths["GET /diffs/paths[?endpoint=]<br/>endpoints → diffing field paths<br/>(src/http/query.rs)"]
         detail["GET /diffs/detail?endpoint=&path=<br/>raw counts + paginated samples;<br/>per-endpoint classifier applied at read time (R31/R33)<br/>(src/http/query.rs)"]
         reset["DELETE /diffs?endpoint=<br/>clear an endpoint's aggregation + live buffer (R33)<br/>(src/http/query.rs)"]
@@ -139,18 +139,24 @@ Each `DiffSample` in `/diffs/detail` additionally carries `request_curl` (a
 replayable curl with a `$RIFFY_TARGET` placeholder host), present only when the
 endpoint enabled `capture_request_curl` (R38).
 
-| Metric | Labels | Emitted from |
-|--------|--------|--------------|
-| `riffy_proxy_request_total` | method, endpoint, status (HTTP code or `cancelled`) | `ProxyRequestGuard` in `track_proxy` |
-| `riffy_proxy_request_duration_seconds` | method, endpoint | `ProxyRequestGuard` in `track_proxy` |
-| `riffy_upstream_request_duration_seconds` | upstream (baseline/candidate/control), endpoint, outcome (`ok`/`error`/`cancelled`) | `UpstreamTimer` in `forward` + its background task |
-| `riffy_diff_pipeline_lag_seconds` | — | consumer, after a diff entry is stored |
-| `riffy_diff_fields_total` | endpoint, diff_type (raw/noise) | consumer, after a diff entry is stored |
+Each metric is **defined in the module that emits it** (R39); the shared
+drop-guard timing primitive (`GuardedTimer`, used by the proxy and upstream
+timers) lives in `src/telemetry/timer.rs`, and `telemetry::install_prometheus`
+installs the global recorder.
 
-Request and upstream timings are recorded by **drop guards** (R21): when a
-future is dropped at an `.await` (client disconnect, shutdown, panic unwind),
-the guard's `Drop` impl records the sample with `status="cancelled"` /
-`outcome="cancelled"` instead of losing it. Duration histograms therefore
+| Metric | Labels | Defined in / emitted from |
+|--------|--------|--------------|
+| `riffy_proxy_request_total` | method, endpoint, status (HTTP code or `cancelled`) | `src/http/metrics.rs`, via the `track_proxy` middleware |
+| `riffy_proxy_request_duration_seconds` | method, endpoint | `src/http/metrics.rs`, via the `track_proxy` middleware |
+| `riffy_upstream_request_duration_seconds` | upstream (baseline/candidate/control), endpoint, outcome (`ok`/`error`/`cancelled`) | `src/upstream/metrics.rs`, started in `forward` + its background task |
+| `riffy_diff_pipeline_lag_seconds` | — | `src/pipeline/metrics.rs`, called by the consumer after a diff entry is stored |
+| `riffy_diff_fields_total` | endpoint, diff_type (raw/noise) | `src/pipeline/metrics.rs`, called by the consumer after a diff entry is stored |
+
+Request and upstream timings are recorded by the shared **`GuardedTimer`** drop
+guard (R21, `src/telemetry/timer.rs`): when a future is dropped at an `.await`
+(client disconnect, shutdown, panic unwind), the timer's `Drop` impl records the
+sample with the `cancelled` outcome (surfaced as `status="cancelled"` /
+`outcome="cancelled"` by each module's `record` closure) instead of losing it. Duration histograms therefore
 include abandoned requests (time until abandonment) and carry no survivorship
 bias. Consumer-side metrics need no guard — they run in a detached task that
 client cancellation cannot drop.

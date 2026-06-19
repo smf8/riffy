@@ -1,1 +1,1 @@
-mod metrics_test;
+mod timer_test;

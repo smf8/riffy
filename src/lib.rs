@@ -12,3 +12,6 @@ pub mod pipeline;
 pub mod storage;
 pub mod telemetry;
 pub mod upstream;
+
+#[cfg(test)]
+mod test_support;
