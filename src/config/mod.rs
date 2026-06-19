@@ -8,24 +8,15 @@ use std::time::Duration;
 #[cfg(test)]
 mod tests;
 
-/// Minimal config values supplied on the command line. These override every
-/// file/env source so an operator can run riffy without a config file.
 #[derive(Debug, Default)]
 pub struct CliOverrides {
-    /// Explicit config file path; when set it replaces the default `config`
-    /// lookup in the working directory.
     pub config_path: Option<PathBuf>,
     pub baseline: Option<String>,
     pub control: Option<String>,
     pub candidate: Option<String>,
-    /// Endpoint patterns to analyze (each with default thresholds); when
-    /// non-empty they replace the configured endpoint list.
     pub endpoints: Vec<String>,
 }
 
-/// Built-in defaults, embedded at compile time and layered first. Section
-/// defaults live here rather than in per-field `#[serde(default)]` attributes;
-/// see `default.yaml`.
 pub(crate) const DEFAULT_CONFIG: &str = include_str!("default.yaml");
 
 #[derive(Debug, Deserialize, garde::Validate)]
@@ -79,9 +70,8 @@ pub struct Upstream {
     pub timeout: Duration,
 }
 
-/// Per-field regression thresholds (diffy's noise filter). Defaults are the
-/// diffy values: 20% relative, 0.03% absolute. These are per-endpoint, so they
-/// stay in code rather than `default.yaml`.
+/// diffy defaults: 20% relative, 0.03% absolute. Kept in code (not default.yaml)
+/// because they are per-endpoint and duplicated into each EndpointConfig.
 #[derive(Debug, Clone, Copy, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Threshold {
@@ -122,36 +112,29 @@ pub struct EndpointConfig {
     #[garde(dive)]
     #[serde(default)]
     pub threshold: Threshold,
-    /// Dot-separated JSON paths to exclude from diff analysis for this endpoint.
+    /// Dot-separated JSON paths excluded from diff analysis.
     /// Subtree suppression: `"a.b"` also suppresses `"a.b.c"`, `"a.b.d.e"`, etc.
     #[garde(skip)]
     #[serde(default)]
     pub suppress_paths: Vec<String>,
-    /// Fraction of requests to analyze: 0.0 = none, 1.0 = all (default).
-    /// Sampled-out requests are still proxied (baseline only); the
-    /// candidate/control fan-out and analysis are skipped.
+    /// Fraction of requests to fan out to candidate/control (0.0–1.0).
+    /// Sampled-out requests are still proxied baseline-only; analysis is skipped.
     #[garde(range(min = 0.0, max = 1.0))]
     #[serde(default = "default_sample_rate")]
     pub sample_rate: f64,
-    /// Capture the originating request as a replayable curl command on each
-    /// stored diff entry (default off). Persists request headers/body to
-    /// storage, so it is opt-in per endpoint.
+    /// Capture the originating request as a replayable curl on each stored diff.
+    /// Opt-in because it persists request headers/body to storage.
     #[garde(skip)]
     #[serde(default)]
     pub capture_request_curl: bool,
-    /// Store credential header values verbatim in the captured curl (default
-    /// off). When off, credential headers (authorization, cookie, …) are still
-    /// listed but their values are redacted. Only meaningful when
-    /// `capture_request_curl` is set.
+    /// Store credential header values verbatim in the captured curl.
+    /// When false, credential headers are listed but their values are redacted.
+    /// Only meaningful when `capture_request_curl` is set.
     #[garde(skip)]
     #[serde(default)]
     pub store_credentials_header: bool,
 }
 
-/// Storage for diffs and aggregation snapshots. `aggregation-interval` and
-/// `stream-cap` are common to every backend (they govern flush cadence and
-/// sample retention regardless of where data lands); `backend` selects between
-/// Redis and the in-memory store.
 #[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Storage {
@@ -160,13 +143,11 @@ pub struct Storage {
     pub aggregation_interval: Duration,
     #[garde(range(min = 1))]
     pub stream_cap: usize,
-    /// Read/retention window: aggregation counts older than this age out, so the
-    /// regression verdict reflects only recent traffic.
+    /// Counts older than this window age out, so the regression verdict reflects only recent traffic.
     #[garde(skip)]
     #[serde(with = "humantime_serde")]
     pub window: Duration,
-    /// Time-bucket granularity within the window (counts are bucketed at this
-    /// resolution).
+    /// Time-bucket granularity; counts are bucketed at this resolution within the window.
     #[garde(skip)]
     #[serde(with = "humantime_serde")]
     pub bucket: Duration,
@@ -202,7 +183,6 @@ pub struct Logging {
     pub level: String,
 }
 
-/// Jaeger/OTLP trace export configuration (off by default).
 #[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Jaeger {
@@ -212,7 +192,6 @@ pub struct Jaeger {
     /// The exporter appends `/v1/traces` automatically.
     #[garde(skip)]
     pub endpoint: String,
-    /// Fraction of traces to sample (0.0 = none, 1.0 = all).
     /// Uses `TraceIdRatioBased` wrapped in `ParentBased`, so child spans
     /// follow the parent's sampling decision.
     #[garde(range(min = 0.0, max = 1.0))]
@@ -229,10 +208,8 @@ pub struct Metrics {
 }
 
 pub fn load(cli: &CliOverrides) -> anyhow::Result<Riffy> {
-    // Layered, lowest → highest priority: embedded defaults, the config file
-    // (CLI `--config` path or `config` in the cwd), `RIFFY__` env vars (nested
-    // via a `__` separator, e.g. `RIFFY__SERVER__PROXY_PORT`), then the CLI value
-    // overrides. `config.example.yaml` is documentation only — not auto-loaded.
+    // Priority (lowest → highest): embedded defaults, config file (CLI path or
+    // `config` in cwd), `RIFFY__` env vars (`__` separator), then CLI overrides.
     let mut builder =
         Config::builder().add_source(File::from_str(DEFAULT_CONFIG, FileFormat::Yaml));
     builder = match &cli.config_path {
@@ -251,10 +228,6 @@ pub fn load(cli: &CliOverrides) -> anyhow::Result<Riffy> {
     Ok(config)
 }
 
-/// Layer the CLI value overrides onto the config builder as the highest-priority
-/// source. Built as JSON (via serde_json, so values are escaped correctly) and
-/// merged like any other source: scalar upstream fields deep-merge, the
-/// endpoint list replaces.
 pub(crate) fn apply_cli_overrides(
     builder: ConfigBuilder<DefaultState>,
     cli: &CliOverrides,
@@ -295,7 +268,6 @@ pub(crate) fn apply_cli_overrides(
 }
 
 impl Riffy {
-    /// Startup-time sanity checks beyond serde's type validation.
     pub fn validate(&self) -> anyhow::Result<()> {
         use anyhow::ensure;
 

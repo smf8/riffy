@@ -5,7 +5,6 @@ use crate::compare::diff::diff;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Classification of a difference at a given path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffType {
@@ -19,14 +18,10 @@ pub enum DiffType {
     StatusMismatch,
 }
 
-/// Reserved field path for an HTTP status-code divergence (baseline vs another
-/// upstream). Not a real body path — the leading `:` cannot collide with a
-/// flattened JSON dot-path, so it is safe as a synthetic field key.
+/// Reserved field path for a status-code divergence. The leading `:` cannot
+/// collide with a flattened JSON dot-path, so it is safe as a synthetic key.
 pub const STATUS_FIELD: &str = ":status";
 
-/// A flattened representation of a single difference at a dot-separated path.
-/// `Deserialize` so the read API can reconstruct it from JSON persisted in the
-/// store (Redis stream fields / in-memory entries).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldDiff {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,16 +31,12 @@ pub struct FieldDiff {
     pub diff_type: DiffType,
 }
 
-/// Recursively flatten a `Difference` tree into a `HashMap<String, FieldDiff>`
-/// keyed by dot-separated JSON paths (e.g. `"user.name"`, `"items.0"`).
 pub fn flatten(diff: &Difference, prefix: &str) -> HashMap<String, FieldDiff> {
     let mut out = HashMap::new();
     flatten_into(diff, prefix, &mut out);
     out
 }
 
-/// Join a path prefix and a child segment with a dot, avoiding a leading dot
-/// when the prefix is empty (root-level fields).
 fn join_path(prefix: &str, segment: &str) -> String {
     if prefix.is_empty() {
         segment.to_owned()
@@ -145,8 +136,6 @@ fn flatten_into(diff: &Difference, path: &str, out: &mut HashMap<String, FieldDi
     }
 }
 
-/// Diff two `serde_json::Value`s and flatten the result into a
-/// `HashMap<String, FieldDiff>` keyed by dot-separated paths from the root.
 pub fn flatten_value(left: &Value, right: &Value) -> HashMap<String, FieldDiff> {
     let difference = diff(left, right);
     flatten(&difference, "")

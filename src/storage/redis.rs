@@ -8,11 +8,10 @@ use super::{
 };
 use crate::compare::flatten::FieldDiff;
 
-/// Redis set tracking every endpoint with stored aggregation buckets, so the
-/// read API can enumerate endpoints without scanning the keyspace.
+/// Redis set tracking every endpoint with stored aggregation buckets,
+/// so list_aggregations can enumerate endpoints without scanning the keyspace.
 const ENDPOINTS_INDEX: &str = "riffy:agg:__endpoints__";
 
-/// Key for one endpoint's aggregation bucket: `riffy:agg:{endpoint}:{bucket}`.
 fn bucket_key(endpoint: &str, bucket: u64) -> String {
     format!("{AGGREGATION_KEY_PREFIX}:{endpoint}:{bucket}")
 }
@@ -21,21 +20,15 @@ use redis::aio::ConnectionManager;
 use redis::streams::{StreamId, StreamMaxlen, StreamRangeReply};
 use redis::{from_redis_value, AsyncCommands, Value};
 
-/// Redis-backed `DiffStore`: per-request diffs go to a stream (`XADD`),
-/// aggregation snapshots to one hash per endpoint (`HSET`, pipelined).
 pub struct RedisDiffStore {
     conn: ConnectionManager,
     /// Approximate cap on the diff stream length (`XADD MAXLEN ~`).
     stream_cap: usize,
-    /// Aggregation time-bucket size and read window, in seconds.
     bucket_secs: u64,
     window_secs: u64,
 }
 
 impl RedisDiffStore {
-    /// Connect with an auto-reconnecting multiplexed connection. The stream and
-    /// aggregation keys are fixed constants (`DIFF_STREAM_KEY` /
-    /// `AGGREGATION_KEY_PREFIX`), not configuration.
     pub async fn connect(
         uri: &str,
         stream_cap: usize,
@@ -80,9 +73,8 @@ impl DiffStore for RedisDiffStore {
             fields.push(("request_curl", curl.clone()));
         }
 
-        // ConnectionManager is a cheap clonable handle to one multiplexed connection.
-        // Approximate trimming (`~`) lets Redis trim in whole macro-nodes, far
-        // cheaper than exact trimming on every append.
+        // Approximate trimming (`~`) lets Redis trim whole macro-nodes, far cheaper
+        // than exact trimming on every append.
         let mut conn = self.conn.clone();
         let _id: String = conn
             .xadd_maxlen(
@@ -102,12 +94,9 @@ impl DiffStore for RedisDiffStore {
             return Ok(());
         }
 
-        // Counts go into the current time bucket key. Each is an HINCRBY so
-        // concurrent instances sum into the same bucket instead of overwriting;
-        // per-field counts are flat `raw:{path}` / `noise:{path}` entries so
-        // HINCRBY can target them. Each bucket gets a TTL (window + one bucket)
-        // so old data ages out — reads only ever see the retention window.
-        // Atomic (MULTI/EXEC) so a reader never observes a half-applied flush.
+        // HINCRBY so concurrent instances sum into the same bucket instead of overwriting.
+        // Each bucket gets a TTL (window + one bucket) so old data ages out.
+        // Wrapped in MULTI/EXEC (pipe.atomic()) so a reader never sees a half-applied flush.
         let now = chrono::Utc::now();
         let bucket = current_bucket(self.bucket_secs);
         let ttl = (self.window_secs + self.bucket_secs) as i64;
@@ -147,7 +136,6 @@ impl DiffStore for RedisDiffStore {
         &self,
         endpoint: &str,
     ) -> Result<Option<EndpointAggregation>, StoreError> {
-        // Sum the window's bucket keys in one pipelined round-trip.
         let current = current_bucket(self.bucket_secs);
         let count = window_bucket_count(self.window_secs, self.bucket_secs);
 
@@ -180,7 +168,6 @@ impl DiffStore for RedisDiffStore {
 
         let mut out = Vec::new();
         for endpoint in endpoints {
-            // Skip endpoints whose buckets have all aged out of the window.
             if let Some(agg) = self.get_aggregation(&endpoint).await? {
                 out.push(agg);
             }
@@ -191,8 +178,7 @@ impl DiffStore for RedisDiffStore {
     async fn reset_aggregation(&self, endpoint: &str) -> Result<(), StoreError> {
         let mut conn = self.conn.clone();
 
-        // Delete every bucket key for this endpoint (cursor SCAN, not KEYS), and
-        // drop it from the index set.
+        // SCAN instead of KEYS — safe under load, no blocking keyspace scan.
         let pattern = format!("{AGGREGATION_KEY_PREFIX}:{endpoint}:*");
         let mut cursor: u64 = 0;
         let mut keys: HashSet<String> = HashSet::new();
@@ -238,9 +224,9 @@ impl DiffStore for RedisDiffStore {
         limit: usize,
         offset: usize,
     ) -> Result<SamplePage, StoreError> {
-        // Scan the stream newest-first in pages, collecting one sample past the
-        // requested window so `has_more` is known. The stream is shared across
-        // endpoints, so non-matching entries are filtered out here.
+        // Scan newest-first in pages, collecting one extra sample so `has_more` is
+        // known without a second query. The stream is shared across endpoints, so
+        // non-matching entries are filtered here.
         const PAGE: usize = 256;
         let want = offset.saturating_add(limit).saturating_add(1);
         let mut conn = self.conn.clone();
@@ -271,7 +257,7 @@ impl DiffStore for RedisDiffStore {
                 break;
             }
             match oldest_id {
-                // Exclusive upper bound: continue strictly older than this id.
+                // `(` prefix = exclusive lower bound; continue strictly older than this id.
                 Some(id) => end = format!("({id}"),
                 None => break,
             }
@@ -288,9 +274,8 @@ impl DiffStore for RedisDiffStore {
     }
 }
 
-/// Reconstruct an `EndpointAggregation` from a `riffy:agg:{endpoint}` hash.
-/// `total` and `last_updated` are reserved keys; every other key is a
-/// `raw:{path}` / `noise:{path}` per-field counter that is regrouped by path.
+/// `total` and `last_updated` are reserved keys; all others are
+/// `raw:{path}` / `noise:{path}` per-field counters regrouped by path.
 fn parse_aggregation(
     endpoint: String,
     map: &HashMap<String, String>,
@@ -318,10 +303,10 @@ fn parse_aggregation(
                 );
             }
             other => {
-                // Split only on the first ':' so paths may themselves contain ':'.
+                // Split on first ':' only; paths may contain ':' (e.g. `:status`).
                 let (kind, path) = match other.split_once(':') {
                     Some(parts) => parts,
-                    None => continue, // unknown/stale field — ignore
+                    None => continue,
                 };
                 let count = value.parse::<u64>().map_err(|e| {
                     StoreError::Corrupt(format!(
@@ -332,7 +317,7 @@ fn parse_aggregation(
                 match kind {
                     "raw" => field.raw_count = count,
                     "noise" => field.noise_count = count,
-                    _ => continue, // unknown prefix — ignore
+                    _ => continue,
                 }
             }
         }
@@ -350,8 +335,6 @@ fn parse_aggregation(
     })
 }
 
-/// Build a `DiffSample` from one stream entry if it belongs to `endpoint` and
-/// carries a diff at `path`; otherwise `None`.
 fn sample_from_entry(
     entry: &StreamId,
     endpoint: &str,
@@ -386,8 +369,6 @@ fn sample_from_entry(
     }))
 }
 
-/// Read one stream entry field as a UTF-8 string (entries are always written
-/// as bulk strings by `append_diff`).
 fn stream_field(map: &HashMap<String, Value>, name: &str) -> Result<Option<String>, StoreError> {
     match map.get(name) {
         Some(value) => Ok(Some(from_redis_value(value).map_err(StoreError::Redis)?)),
@@ -395,7 +376,6 @@ fn stream_field(map: &HashMap<String, Value>, name: &str) -> Result<Option<Strin
     }
 }
 
-/// Parse a stored `{path: FieldDiff}` JSON map and pluck the diff at `path`.
 fn diff_at_path(json: Option<&str>, path: &str) -> Result<Option<FieldDiff>, StoreError> {
     match json {
         Some(json) => {

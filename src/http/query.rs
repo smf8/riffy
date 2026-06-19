@@ -1,8 +1,3 @@
-//! Read-side query API (admin server): inspect recorded diffs.
-//! `GET /diffs/paths` lists endpoints and their diffing field paths;
-//! `GET /diffs/detail` returns one field's aggregated stats plus a paginated,
-//! newest-first list of the actual diff samples.
-
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
@@ -21,7 +16,7 @@ use crate::storage::{DiffStore, EndpointAggregation, FieldAggregation, SamplePag
 
 const DEFAULT_SAMPLE_LIMIT: usize = 20;
 const MAX_SAMPLE_LIMIT: usize = 100;
-/// Cap on `offset` so a pathological value can't trigger an unbounded scan.
+// Cap on `offset` to prevent unbounded scans from pathological values.
 const MAX_SAMPLE_OFFSET: usize = 100_000;
 
 #[derive(Debug, Deserialize)]
@@ -50,8 +45,6 @@ impl From<EndpointAggregation> for EndpointPaths {
     }
 }
 
-/// `GET /diffs/paths` — list the field paths that have diffs, per endpoint.
-/// With `?endpoint=<ep>` it returns just that endpoint (404 if unknown).
 pub async fn list_paths(
     State(store): State<Arc<dyn DiffStore>>,
     Query(query): Query<PathsQuery>,
@@ -95,8 +88,6 @@ pub struct DiffDetail {
     pub samples: SamplePage,
 }
 
-/// `GET /diffs/detail?endpoint=<ep>&path=<p>` — aggregated stats for one field
-/// plus a paginated, newest-first list of the actual diff samples at that path.
 pub async fn diff_detail(
     State(store): State<Arc<dyn DiffStore>>,
     State(classifiers): State<Arc<EndpointClassifiers>>,
@@ -124,8 +115,6 @@ pub async fn diff_detail(
         .recent_samples(&query.endpoint, &query.path, limit, offset)
         .await?;
 
-    // Nothing recorded for this endpoint+path: no aggregation field and no
-    // samples at the start of the stream.
     if field.is_none() && samples.items.is_empty() && !samples.has_more && offset == 0 {
         return Err(AppError::NotFound(format!(
             "no diffs recorded for endpoint '{}' path '{}'",
@@ -133,16 +122,14 @@ pub async fn diff_detail(
         )));
     }
 
-    // Derive the verdict and percentages from the stored raw counts at read
-    // time against the live thresholds (the store persists counts only).
     let counts = FieldAggregation {
         raw_count,
         noise_count,
     };
     let is_regression = if query.path == STATUS_FIELD {
         // A status divergence is categorically a regression when the candidate
-        // diverges more than the control noise floor — independent of the
-        // percentage thresholds, which would dilute a rare but critical status.
+        // diverges more than the control — independent of percentage thresholds,
+        // which would dilute a rare but critical status difference.
         counts.raw_count > counts.noise_count
     } else {
         classifiers
@@ -165,8 +152,6 @@ pub async fn diff_detail(
     .into_response())
 }
 
-/// The three upstream base URLs (scheme-normalized) the dashboard substitutes
-/// for the `$RIFFY_TARGET` placeholder in a captured curl.
 #[derive(Debug, Clone, Serialize)]
 pub struct UpstreamTargets {
     pub baseline: String,
@@ -175,9 +160,6 @@ pub struct UpstreamTargets {
 }
 
 impl UpstreamTargets {
-    /// Normalize each address the same way the upstream client does: an
-    /// explicit scheme is honored, otherwise `http://` is assumed — so the
-    /// returned bases are directly usable as a curl URL prefix.
     pub fn from_addresses(baseline: &str, candidate: &str, control: &str) -> Self {
         Self {
             baseline: normalize_base(baseline),
@@ -195,8 +177,6 @@ fn normalize_base(addr: &str) -> String {
     }
 }
 
-/// `GET /upstreams` — the three upstream base URLs, for placeholder
-/// substitution in the dashboard's captured-curl view.
 pub async fn upstreams(State(targets): State<Arc<UpstreamTargets>>) -> Json<UpstreamTargets> {
     Json((*targets).clone())
 }
@@ -206,10 +186,6 @@ pub struct ResetQuery {
     pub endpoint: String,
 }
 
-/// `DELETE /diffs?endpoint=<ep>` — clear all recorded statistics for one
-/// endpoint: its stored aggregation counts and any counts still buffered in the
-/// live counters. Per-request samples are left to age out via the stream cap.
-/// 404 if the endpoint has no recorded statistics.
 pub async fn reset_stats(
     State(store): State<Arc<dyn DiffStore>>,
     State(counters): State<Arc<LiveCounters>>,
@@ -222,8 +198,7 @@ pub async fn reset_stats(
         )));
     }
 
-    // Clear the buffer first so an in-flight flush can't re-add stale counts
-    // after the store is cleared.
+    // Clear the buffer first so an in-flight flush can't re-add stale counts after the store is cleared.
     counters.reset_endpoint(&query.endpoint);
     store.reset_aggregation(&query.endpoint).await?;
 

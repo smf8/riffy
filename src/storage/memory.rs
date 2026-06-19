@@ -9,17 +9,13 @@ use super::{
 use chrono::Utc;
 use tokio::sync::Mutex;
 
-/// Default bucket/window used by `new()` / `with_capacity()` (tests, local dev).
 const DEFAULT_BUCKET_SECS: u64 = 60;
 const DEFAULT_WINDOW_SECS: u64 = 3600;
 
-/// In-memory `DiffStore` for tests and local development without Redis.
-/// Aggregation counts are kept in per-endpoint time buckets and summed over the
-/// retention window on read; buckets older than the window are evicted.
 pub struct InMemoryDiffStore {
     entries: Mutex<VecDeque<DiffEntry>>,
     aggregations: Mutex<HashMap<String, BTreeMap<u64, EndpointAggregation>>>,
-    /// Max retained samples; the front (oldest) is dropped past this.
+    /// Max retained samples; oldest is dropped when exceeded.
     cap: usize,
     bucket_secs: u64,
     window_secs: u64,
@@ -32,13 +28,10 @@ impl Default for InMemoryDiffStore {
 }
 
 impl InMemoryDiffStore {
-    /// Unbounded sample retention with default windowing — the default used by
-    /// tests and local dev.
     pub fn new() -> Self {
         Self::with_capacity(usize::MAX)
     }
 
-    /// Bounded sample retention with default windowing.
     pub fn with_capacity(cap: usize) -> Self {
         Self::with_retention(
             cap,
@@ -47,8 +40,6 @@ impl InMemoryDiffStore {
         )
     }
 
-    /// Full constructor: sample cap plus the aggregation bucket size and read
-    /// window.
     pub fn with_retention(cap: usize, bucket: Duration, window: Duration) -> Self {
         Self {
             entries: Mutex::new(VecDeque::new()),
@@ -63,12 +54,10 @@ impl InMemoryDiffStore {
         self.entries.lock().await.iter().cloned().collect()
     }
 
-    /// Windowed aggregation for one endpoint (inherent test helper).
     pub async fn aggregation(&self, endpoint: &str) -> Option<EndpointAggregation> {
         self.windowed(endpoint).await
     }
 
-    /// Sum one endpoint's buckets over the read window.
     async fn windowed(&self, endpoint: &str) -> Option<EndpointAggregation> {
         let current = current_bucket(self.bucket_secs);
         let count = window_bucket_count(self.window_secs, self.bucket_secs);
@@ -99,7 +88,6 @@ impl DiffStore for InMemoryDiffStore {
     async fn add_aggregation(&self, deltas: &[EndpointAggregation]) -> Result<(), StoreError> {
         let now = Utc::now();
         let bucket = current_bucket(self.bucket_secs);
-        // Keep the window's worth of buckets (plus the current one).
         let keep_from =
             bucket.saturating_sub(window_bucket_count(self.window_secs, self.bucket_secs));
 
@@ -164,7 +152,7 @@ impl DiffStore for InMemoryDiffStore {
         limit: usize,
         offset: usize,
     ) -> Result<SamplePage, StoreError> {
-        // Look one sample past the requested window to know whether more exist.
+        // Collect one extra sample to determine has_more without a second pass.
         let want = offset.saturating_add(limit).saturating_add(1);
         let mut matches = Vec::new();
 

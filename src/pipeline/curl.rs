@@ -1,27 +1,15 @@
-//! Render a captured request as a replayable curl command.
-//!
-//! The host is left as a `$RIFFY_TARGET` placeholder; the dashboard substitutes
-//! the chosen upstream (baseline / candidate / control) when copying. Building
-//! happens in the consumer, off the proxy hot path.
-
 use std::borrow::Cow;
 
 use super::RequestSnapshot;
 use axum::http::HeaderMap;
 use bytes::Bytes;
 
-/// Placeholder host substituted by the dashboard for baseline/candidate/control.
 pub const TARGET_PLACEHOLDER: &str = "$RIFFY_TARGET";
 
-/// Max request-body size embedded inline; larger (or non-UTF-8) bodies are
-/// omitted with a comment so a stored curl never balloons or carries raw bytes.
 const MAX_CURL_BODY_BYTES: usize = 64 * 1024;
 
-/// Placeholder written in place of a redacted credential header value.
 const REDACTED: &str = "<redacted>";
 
-/// Request headers whose values are redacted unless the endpoint sets
-/// `store_credentials_header`.
 const CREDENTIAL_HEADERS: &[&str] = &[
     "authorization",
     "cookie",
@@ -30,8 +18,7 @@ const CREDENTIAL_HEADERS: &[&str] = &[
     "x-auth-token",
 ];
 
-/// Headers never emitted into the curl: curl derives `host` from the URL and
-/// recomputes `content-length`, and hop-by-hop headers must not be replayed.
+// curl derives `host` from the URL and recomputes `content-length`; hop-by-hop headers must not be replayed.
 const SKIP_HEADERS: &[&str] = &[
     "host",
     "content-length",
@@ -42,8 +29,6 @@ const SKIP_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
-/// Render `snap` as a multi-line curl command. Deterministic: headers are
-/// sorted, so the output is stable across runs (and testable).
 pub fn build_curl(snap: &RequestSnapshot) -> String {
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!("curl -X {}", snap.method.as_str()));
@@ -80,8 +65,6 @@ pub fn build_curl(snap: &RequestSnapshot) -> String {
     }
 }
 
-/// Headers to emit, as `(name, value)` pairs sorted for deterministic output.
-/// Skips `SKIP_HEADERS`; non-UTF-8 values are rendered lossily.
 fn sorted_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = headers
         .iter()
@@ -119,9 +102,6 @@ fn body_arg(body: &Bytes) -> BodyArg {
     }
 }
 
-/// Shell-quote `s` for safe inclusion in the rendered curl command, delegating
-/// to `shell-escape` (POSIX `'...'` quoting, embedded `'` escaped as `'\''`).
-/// Strings made up solely of shell-safe characters are returned unquoted.
 fn shell_quote(s: &str) -> String {
     shell_escape::unix::escape(Cow::Borrowed(s)).into_owned()
 }

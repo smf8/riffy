@@ -59,8 +59,6 @@ impl UpstreamClient {
     ) -> Result<UpstreamResponse, UpstreamError> {
         tracing::Span::current().record("target", target);
 
-        // The scheme is derived from the address: an explicit `http://` /
-        // `https://` prefix is honored, otherwise `http://` is assumed.
         let url = if target.contains("://") {
             format!("{target}{path}")
         } else {
@@ -69,7 +67,6 @@ impl UpstreamClient {
 
         let mut builder = self.client.request(method.clone(), &url);
 
-        // Forward all headers except hop-by-hop
         for (name, value) in headers.iter() {
             if HOP_BY_HOP_HEADERS.contains(&name.as_str()) {
                 continue;
@@ -90,8 +87,7 @@ impl UpstreamClient {
         let status = resp.status().as_u16();
         let mut resp_headers = HeaderMap::new();
         for (name, value) in resp.headers().iter() {
-            // Only strip transfer-encoding from response (we buffer the body).
-            // Keep content-length as-is — no decompression, so it should match.
+            // Strip transfer-encoding only: we buffer the body, so content-length still matches.
             if name.as_str() == "transfer-encoding" {
                 continue;
             }

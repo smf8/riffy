@@ -5,9 +5,6 @@ use tokio::io::AsyncReadExt;
 
 use crate::upstream::client::UpstreamResponse;
 
-/// Returns the response body ready for JSON parsing, decompressing it when a
-/// supported `content-encoding` is present. `None` when the encoding is
-/// unsupported or the body fails to decompress.
 pub async fn decode_body(response: &UpstreamResponse) -> Option<Cow<'_, [u8]>> {
     let Some(value) = response.headers.get(axum::http::header::CONTENT_ENCODING) else {
         return Some(Cow::Borrowed(response.body.as_ref()));

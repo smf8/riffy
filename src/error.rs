@@ -3,8 +3,6 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
-/// Top-level HTTP error boundary.
-/// Each module defines its own error type that converts into this.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("{0}")]
@@ -44,27 +42,3 @@ impl From<crate::upstream::error::UpstreamError> for AppError {
         AppError::Upstream(e)
     }
 }
-
-// impl From<crate::config::error::ConfigError> for AppError {
-//     fn from(e: crate::config::error::ConfigError) -> Self {
-//         AppError::Config(e)
-//     }
-// }
-//
-// impl From<crate::redis::error::RedisError> for AppError {
-//     fn from(e: crate::redis::error::RedisError) -> Self {
-//         AppError::Redis(e)
-//     }
-// }
-//
-// impl From<crate::compare::error::CompareError> for AppError {
-//     fn from(e: crate::compare::error::CompareError) -> Self {
-//         AppError::Compare(e)
-//     }
-// }
-//
-// impl From<crate::analysis::error::AnalysisError> for AppError {
-//     fn from(e: crate::analysis::error::AnalysisError) -> Self {
-//         AppError::Analysis(e)
-//     }
-// }

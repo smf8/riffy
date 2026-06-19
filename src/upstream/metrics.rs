@@ -1,15 +1,8 @@
-//! Upstream-call metrics: the duration of each baseline/candidate/control
-//! request, labelled by upstream role, endpoint, and outcome. The drop-guard
-//! timing primitive lives in `crate::telemetry::timer`.
-
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::telemetry::timer::GuardedTimer;
 
-/// Build the drop-guard timer for one upstream call. Call `finish(outcome(..))`
-/// on completion; a dropped timer records `outcome="cancelled"` (the awaiting
-/// future was cancelled).
 pub fn request_timer(
     upstream: &'static str,
     endpoint: Arc<str>,
@@ -25,7 +18,6 @@ pub fn request_timer(
     })
 }
 
-/// Map a call's success into the `outcome` label vocabulary.
 pub fn outcome(success: bool) -> &'static str {
     if success {
         "ok"

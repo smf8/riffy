@@ -6,10 +6,6 @@ use crate::storage::{EndpointAggregation, FieldAggregation};
 use chrono::Utc;
 use dashmap::DashMap;
 
-/// Lock-free in-memory counter buffer: endpoint → (total, field path →
-/// raw/noise). It only ever buffers the delta since the last flush; the
-/// consumer drains it on a short interval and adds the delta to the durable
-/// store. All reads go through the store, never these counters.
 #[derive(Default)]
 pub struct LiveCounters {
     endpoints: DashMap<String, EndpointStats>,
@@ -32,8 +28,6 @@ impl LiveCounters {
         Self::default()
     }
 
-    /// Record one analyzed request: bump the endpoint total and the raw/noise
-    /// counters of every differing field path.
     pub fn record(
         &self,
         endpoint: &str,
@@ -63,11 +57,6 @@ impl LiveCounters {
         }
     }
 
-    /// Drain the buffered deltas: each counter is atomically swapped to zero
-    /// and returned as an `EndpointAggregation`. Endpoints with no requests
-    /// since the last drain are skipped. Counters reset to zero only ever lag a
-    /// concurrent `record` by at most one flush interval, which is acceptable
-    /// for statistical aggregation.
     pub fn drain(&self) -> Vec<EndpointAggregation> {
         let now = Utc::now();
         let mut out = Vec::new();
@@ -75,7 +64,7 @@ impl LiveCounters {
         for endpoint in self.endpoints.iter() {
             let total = endpoint.value().total.swap(0, Ordering::Relaxed);
             if total == 0 {
-                // No requests this interval ⇒ field counters are zero too.
+                // No requests this interval — field counters are zero too.
                 continue;
             }
 
@@ -106,14 +95,10 @@ impl LiveCounters {
         out
     }
 
-    /// Drop all buffered counts for one endpoint. Used by the admin reset so
-    /// pending deltas don't immediately re-populate the store after a clear.
     pub fn reset_endpoint(&self, endpoint: &str) {
         self.endpoints.remove(endpoint);
     }
 
-    /// Add drained deltas back into the buffer. Used to retry a flush whose
-    /// store write failed, so a transient backend error never drops counts.
     pub fn restore(&self, deltas: &[EndpointAggregation]) {
         for delta in deltas {
             let endpoint = self.endpoints.entry(delta.endpoint.clone()).or_default();

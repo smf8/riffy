@@ -1,7 +1,6 @@
 use axum::http::StatusCode;
 use thiserror::Error;
 
-/// Errors from upstream proxy operations.
 #[derive(Debug, Error)]
 pub enum UpstreamError {
     #[error("upstream {target} timeout: {source}")]

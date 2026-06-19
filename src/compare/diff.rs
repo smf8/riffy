@@ -2,7 +2,6 @@ use crate::compare::Difference;
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// Recursively compare two `serde_json::Value`s and return a structured diff.
 pub fn diff(left: &Value, right: &Value) -> Difference {
     if left == right {
         return Difference::NoDifference(left.clone());
@@ -71,7 +70,6 @@ fn diff_arrays(left_arr: &[Value], right_arr: &[Value]) -> Difference {
         };
     }
 
-    // Same size, same elements (as multisets), different positions → pure reordering.
     if set_difference(left_arr, right_arr).is_empty() {
         return Difference::OrderingDifference;
     }
@@ -89,8 +87,6 @@ fn diff_arrays(left_arr: &[Value], right_arr: &[Value]) -> Difference {
     Difference::IndexedDifference { elements }
 }
 
-/// Returns elements from `a` that are not present in `b` (by value equality).
-/// Preserves order and duplicates from `a` that exceed the count in `b`.
 fn set_difference(a: &[Value], b: &[Value]) -> Vec<Value> {
     let mut b_counts: HashMap<String, usize> = HashMap::new();
     for val in b {
@@ -110,8 +106,6 @@ fn set_difference(a: &[Value], b: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-/// Convert a `Value` to a canonical string key for equality comparison.
-/// Uses JSON serialization so that compound values are compared structurally.
 fn value_to_key(val: &Value) -> String {
     serde_json::to_string(val).unwrap_or_else(|_| val.to_string())
 }

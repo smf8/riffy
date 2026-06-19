@@ -1,11 +1,5 @@
-//! Pipeline metrics: the request → diff publish lag and the count of differing
-//! fields per endpoint. Recorded by the detached consumer task, which client
-//! cancellation can never drop — so no drop guard is needed here.
-
 use std::time::Duration;
 
-/// Record pipeline lag (request received → diff published) and the number of
-/// differing fields, per endpoint.
 pub fn record_diff_published(
     endpoint: &str,
     raw_fields: usize,

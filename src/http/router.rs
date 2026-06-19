@@ -4,7 +4,7 @@ use crate::analysis::classify::EndpointClassifiers;
 use crate::analysis::counters::LiveCounters;
 use crate::config::Riffy;
 use crate::endpoint::EndpointMatcher;
-use crate::http::metrics::{render_metrics, endpoint_metric_middleware};
+use crate::http::metrics::{endpoint_metric_middleware, render_metrics};
 use crate::pipeline::AnalysisMessage;
 use crate::storage::DiffStore;
 use crate::upstream::client::UpstreamClient;
@@ -23,26 +23,22 @@ pub struct AppState {
     pub matcher: Arc<EndpointMatcher>,
 }
 
-/// Client-facing router: every path falls through to the forwarding handler.
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .fallback(any(forward::forward))
-        .layer(middleware::from_fn_with_state(state.clone(), endpoint_metric_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            endpoint_metric_middleware,
+        ))
         .with_state(state)
 }
 
-/// Shared state for the admin server: the optional Prometheus handle, the diff
-/// store backing the read API, and the classifier used to derive regression
-/// verdicts from stored raw counts at read time. `FromRef` lets each handler
-/// extract only the substate it needs.
 #[derive(Clone)]
 pub struct AdminState {
     pub metrics: Option<PrometheusHandle>,
     pub store: Arc<dyn DiffStore>,
     pub classifiers: Arc<EndpointClassifiers>,
     pub counters: Arc<LiveCounters>,
-    /// Upstream base URLs, surfaced via `GET /upstreams` so the dashboard can
-    /// substitute the `$RIFFY_TARGET` placeholder in a captured curl.
     pub upstreams: Arc<UpstreamTargets>,
 }
 
@@ -76,9 +72,6 @@ impl FromRef<AdminState> for Arc<UpstreamTargets> {
     }
 }
 
-/// Admin router: health check, Prometheus metrics, and the diff query API.
-/// `/metrics` renders an empty body when metrics are disabled (no handle
-/// installed).
 pub fn admin_router(state: AdminState) -> Router {
     Router::new()
         .route("/", get(ui::index))

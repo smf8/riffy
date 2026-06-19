@@ -3,9 +3,6 @@ use std::collections::HashMap;
 use crate::config::{EndpointConfig, Threshold};
 use crate::storage::FieldAggregation;
 
-/// Threshold predicate classifying a field's stored counts as a real
-/// regression (diffy's noise filter): the raw counter must exceed the noise
-/// counter both relatively and in absolute terms.
 #[derive(Debug, Clone, Copy)]
 pub struct RegressionClassifier {
     relative_threshold: f64,
@@ -31,10 +28,6 @@ impl RegressionClassifier {
     }
 }
 
-/// Per-endpoint classifiers: each configured endpoint can carry its own
-/// thresholds, so the classifier used at read time is looked up by endpoint.
-/// Endpoints with no configured entry (e.g. unmatched raw paths) fall back to
-/// the diffy defaults.
 #[derive(Debug, Clone)]
 pub struct EndpointClassifiers {
     per_endpoint: HashMap<String, RegressionClassifier>,
@@ -58,8 +51,6 @@ impl EndpointClassifiers {
         }
     }
 
-    /// The classifier configured for `endpoint`, or the diffy-default one when
-    /// the endpoint has no dedicated thresholds.
     pub fn for_endpoint(&self, endpoint: &str) -> &RegressionClassifier {
         self.per_endpoint.get(endpoint).unwrap_or(&self.default)
     }

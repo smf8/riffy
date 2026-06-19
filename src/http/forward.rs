@@ -26,11 +26,6 @@ pub async fn forward(
     let received_at = Instant::now();
     let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
-    // ── Reverse proxy hot path (the only work the client waits on) ──
-    // Forward to baseline, then hand its response straight back. Per the
-
-    // Upstream-timer label: the matched template, or a single bucket for
-    // unmatched paths (baseline is still proxied for those).
     let endpoint_label: Arc<str> = endpoint
         .0
         .clone()
@@ -60,7 +55,6 @@ pub async fn forward(
         "baseline response received"
     );
 
-    // Build the client response from baseline and return it immediately.
     let mut builder = axum::http::Response::builder().status(baseline_response.status);
     for (name, value) in baseline_response.headers.iter() {
         builder = builder.header(name, value);
@@ -74,7 +68,6 @@ pub async fn forward(
                 .unwrap()
         });
 
-    // Side-effect safety: refuse mutating methods unless explicitly allowed.
     if !state.config.proxy.allow_http_side_effects {
         match method {
             Method::POST | Method::PUT | Method::PATCH | Method::DELETE => {
@@ -85,10 +78,6 @@ pub async fn forward(
         }
     }
 
-    // ── Analysis dispatch (off the hot path) ──
-    // Fan out to candidate/control and queue the diff asynchronously. Returns
-    // immediately; the actual upstream calls and channel send run in a spawned
-    // task, so they never delay the response built above.
     dispatch_analysis(
         &state,
         &endpoint,
@@ -106,14 +95,10 @@ pub async fn forward(
     Ok(client_response.into_response())
 }
 
-/// The proxied request plus its baseline outcome, owned so it can move into the
-/// background analysis task.
 struct Dispatch {
     method: Method,
-    /// Raw request path; endpoint resolution happens in the consumer.
+    // Endpoint resolution happens in the consumer, off the proxy hot path.
     path: String,
-    /// Path plus query string, reused for the candidate/control calls and the
-    /// captured-curl URL.
     path_and_query: String,
     headers: HeaderMap,
     body: Bytes,
@@ -121,30 +106,18 @@ struct Dispatch {
     baseline_response: UpstreamResponse,
 }
 
-/// Fan out to the candidate and control upstreams and queue the resulting diff
-/// for the analysis pipeline — entirely off the proxy hot path. The upstream
-/// calls and the channel send run in a spawned task, so this returns at once.
-///
-/// Does nothing for unmatched paths (pure-proxied, baseline only) or for
-/// requests that fall outside the endpoint's sampling window.
 fn dispatch_analysis(state: &AppState, endpoint: &ResolvedEndpoint, req: Dispatch) {
-    // Only registered endpoints fan out. Unmatched paths are pure-proxied
-    // (baseline only): no duplicate upstream load, no analysis.
     let Some(endpoint_key) = endpoint.0.clone() else {
         return;
     };
 
-    // Resolve this endpoint's config once: the sample rate and the request-curl
-    // capture settings.
     let ep_cfg = state
         .config
         .endpoints
         .iter()
         .find(|e| e.pattern == endpoint_key.as_ref());
 
-    // Sampling: skip fan-out when this endpoint's sample_rate < 1.0 and the
-    // random draw falls outside the keep window. sample_rate=0.0 always skips;
-    // sample_rate=1.0 bypasses the RNG entirely.
+    // sample_rate=0.0 always skips; sample_rate=1.0 bypasses the RNG entirely.
     let sample_rate = ep_cfg.map(|e| e.sample_rate).unwrap_or(1.0);
     if sample_rate < 1.0 && rand::random::<f64>() >= sample_rate {
         return;
@@ -212,11 +185,7 @@ fn dispatch_analysis(state: &AppState, endpoint: &ResolvedEndpoint, req: Dispatc
                 tracing::warn!(error = %e, "control upstream failed");
             }
 
-            // Capture the originating request once the upstream calls have
-            // released their borrows of the cloned method/headers/path. This is
-            // already off the hot path (inside the spawned task); the curl
-            // string itself is rendered later in the consumer, only for diffs
-            // that are stored.
+            // Capture after join: the upstream calls hold borrows on method/headers/path.
             let request = capture_request_curl.then(move || RequestSnapshot {
                 method,
                 path_and_query,
@@ -234,8 +203,7 @@ fn dispatch_analysis(state: &AppState, endpoint: &ResolvedEndpoint, req: Dispatc
                 request,
             };
 
-            // try_send sheds load when the consumer lags instead of queueing
-            // unbounded background tasks behind a full channel.
+            // try_send sheds load when the consumer lags rather than queueing unbounded.
             if let Err(e) = analysis_tx.try_send(msg) {
                 tracing::warn!(error = %e, "analysis channel unavailable, dropping diff");
             }

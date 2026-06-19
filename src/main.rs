@@ -44,7 +44,6 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Load config (files + env + CLI overrides)
     let cfg = config::load(&CliOverrides {
         config_path: cli.config,
         baseline: cli.baseline,
@@ -58,7 +57,6 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(service = riffy::SERVICE_NAME, "starting riffy");
 
-    // Upstream client
     let upstream = UpstreamClient::new(
         cfg.upstream.baseline.clone(),
         cfg.upstream.control.clone(),
@@ -66,7 +64,6 @@ async fn main() -> anyhow::Result<()> {
         cfg.upstream.timeout,
     );
 
-    // Analysis pipeline: bounded channel → single consumer task
     let (analysis_tx, analysis_rx) = pipeline::channel(cfg.pipeline.channel_capacity);
 
     let collector = Arc::new(LiveCounters::new());
@@ -75,8 +72,6 @@ async fn main() -> anyhow::Result<()> {
     let classifiers = Arc::new(EndpointClassifiers::from_config(&cfg.endpoints));
     let suppress = Arc::new(EndpointSuppressPaths::from_config(&cfg.endpoints));
 
-    // The store is shared between the consumer (writer) and the admin query API
-    // (reader). Both backends share the aggregation interval and stream cap.
     let aggregation_interval = cfg.storage.aggregation_interval;
     let store: Arc<dyn DiffStore> = match &cfg.storage.backend {
         StorageBackend::Redis { uri } => {
@@ -110,7 +105,6 @@ async fn main() -> anyhow::Result<()> {
     )
     .spawn();
 
-    // Prometheus exporter (admin /metrics renders empty when disabled)
     let metrics_handle = if cfg.metrics.enabled {
         Some(telemetry::install_prometheus().context("failed to install prometheus recorder")?)
     } else {
@@ -120,7 +114,6 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Arc::new(cfg);
     let upstream = Arc::new(upstream);
 
-    // AppState
     let state = AppState {
         config: cfg.clone(),
         upstream,
@@ -128,15 +121,11 @@ async fn main() -> anyhow::Result<()> {
         matcher,
     };
 
-    // Proxy server
     let proxy_addr = format!("{}:{}", cfg.server.address, cfg.server.proxy_port);
     let proxy_app = create_router(state);
     let proxy_listener = tokio::net::TcpListener::bind(&proxy_addr).await?;
     tracing::info!(addr = %proxy_addr, "proxy server listening");
 
-    // Admin server (healthz + metrics + diff query API). The query API applies
-    // the per-endpoint classifiers at read time to derive regressions from the
-    // stored raw counts.
     let upstreams = Arc::new(riffy::http::query::UpstreamTargets::from_addresses(
         &cfg.upstream.baseline,
         &cfg.upstream.candidate,
@@ -153,7 +142,6 @@ async fn main() -> anyhow::Result<()> {
     let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;
     tracing::info!(addr = %admin_addr, "admin server listening");
 
-    // Graceful shutdown
     let shutdown = async {
         tokio::signal::ctrl_c()
             .await
@@ -161,7 +149,6 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("shutdown signal received");
     };
 
-    // Run both servers concurrently
     let proxy_server = axum::serve(proxy_listener, proxy_app);
     let admin_server = axum::serve(admin_listener, admin_app);
 
@@ -179,16 +166,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // The servers (and their AppState holding the analysis sender) are dropped
-    // once select! returns; the consumer then drains the channel, flushes a
-    // final aggregation snapshot, and exits.
+    // AppState (and the analysis sender it holds) is dropped when select! returns,
+    // closing the channel. The consumer drains it, flushes one final aggregation, then exits.
     match tokio::time::timeout(std::time::Duration::from_secs(5), consumer_handle).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!(error = %e, "analysis consumer task failed"),
         Err(_) => tracing::warn!("analysis consumer did not stop within 5s"),
     }
 
-    // Flush any buffered spans to the OTLP collector before exiting.
     if let Some(provider) = tracer_provider {
         if let Err(e) = provider.shutdown() {
             tracing::warn!(error = %e, "failed to shut down tracer provider");

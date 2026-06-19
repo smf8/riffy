@@ -78,7 +78,7 @@ Every use of `.unwrap()` or `.expect()` in non-test code requires an explicit co
 - **Trait definitions always live in `mod.rs`** of their module.
 - Implementations live in separate files within the module directory.
 - Unit tests **must be in a separate file** — never inline in the same file as the implementation. Place them in a `tests/` subdirectory of the module or in `tests/` at the crate root.
-- Only add inline comments where logic is non-obvious. Do not add doc comments to everything — only where they add real value.
+- **No descriptive comments.** Do not use `//`, `///`, or `//!` to explain what a function, struct, module, or field does — the code is self-explanatory. Only add a comment when the **WHY** is non-obvious: a hidden constraint, a subtle invariant, an RFC reference, a workaround for a specific bug, or a design decision that would surprise a reader. If removing the comment wouldn't confuse a future reader, don't write it.
 
 ---
 
