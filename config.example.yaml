@@ -18,6 +18,16 @@ upstream:
 # Each endpoint may carry its own thresholds, suppress_paths, and sample_rate.
 # Omit `threshold` for the diffy defaults (relative 20%, absolute 0.03%).
 #
+# pattern: a path template matched by a radix-tree router (matchit). `:name`
+#   matches exactly one path segment (the name is just a label — any single
+#   segment matches). When several templates overlap, the most specific one
+#   wins: a literal segment beats a `:param` at the same position, regardless of
+#   the order endpoints are listed here. Duplicate and trailing slashes are
+#   normalized and the query string is ignored, so `/api/v1/users/42`,
+#   `/api/v1/users/42/`, and `/api/v1/users/42?x=1` all resolve to
+#   `/api/v1/users/:id`. A path matching no template is still proxied (baseline
+#   only) but not analyzed.
+#
 # suppress_paths: dot-separated JSON paths to exclude from diff analysis.
 #   Two match modes:
 #   - Plain path (no *): suppresses the path and all its descendants.

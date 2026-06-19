@@ -12,6 +12,13 @@ axum = "0.7"
 tower = "0.5"
 tower-http = { version = "0.5", features = ["trace", "timeout"] }
 
+# Endpoint path-template matching (radix tree; the same router axum uses
+# internally, sharing the already-linked 0.7 build). `:param` segment syntax.
+matchit = "0.7"
+
+# POSIX shell quoting for the replayable curl renderer (security-sensitive).
+shell-escape = "0.1"
+
 # HTTP client (upstream proxy)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 bytes = "1"

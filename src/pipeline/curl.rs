@@ -4,6 +4,8 @@
 //! the chosen upstream (baseline / candidate / control) when copying. Building
 //! happens in the consumer, off the proxy hot path.
 
+use std::borrow::Cow;
+
 use super::RequestSnapshot;
 use axum::http::HeaderMap;
 use bytes::Bytes;
@@ -47,7 +49,7 @@ pub fn build_curl(snap: &RequestSnapshot) -> String {
     lines.push(format!("curl -X {}", snap.method.as_str()));
     lines.push(format!(
         "  {}",
-        single_quote(&format!("{TARGET_PLACEHOLDER}{}", snap.path_and_query))
+        shell_quote(&format!("{TARGET_PLACEHOLDER}{}", snap.path_and_query))
     ));
 
     for (name, value) in sorted_headers(&snap.headers) {
@@ -58,7 +60,7 @@ pub fn build_curl(snap: &RequestSnapshot) -> String {
         };
         lines.push(format!(
             "  -H {}",
-            single_quote(&format!("{name}: {rendered}"))
+            shell_quote(&format!("{name}: {rendered}"))
         ));
     }
 
@@ -66,7 +68,7 @@ pub fn build_curl(snap: &RequestSnapshot) -> String {
     // backslash before it, so it never folds into the command.
     let mut trailer: Option<String> = None;
     match body_arg(&snap.body) {
-        BodyArg::Inline(text) => lines.push(format!("  --data-raw {}", single_quote(&text))),
+        BodyArg::Inline(text) => lines.push(format!("  --data-raw {}", shell_quote(&text))),
         BodyArg::Omitted(reason) => trailer = Some(format!("# body omitted ({reason})")),
         BodyArg::None => {}
     }
@@ -117,8 +119,9 @@ fn body_arg(body: &Bytes) -> BodyArg {
     }
 }
 
-/// Wrap `s` in single quotes for shell-safe inclusion, escaping embedded single
-/// quotes as `'\''`.
-fn single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+/// Shell-quote `s` for safe inclusion in the rendered curl command, delegating
+/// to `shell-escape` (POSIX `'...'` quoting, embedded `'` escaped as `'\''`).
+/// Strings made up solely of shell-safe characters are returned unquoted.
+fn shell_quote(s: &str) -> String {
+    shell_escape::unix::escape(Cow::Borrowed(s)).into_owned()
 }

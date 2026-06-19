@@ -70,9 +70,31 @@ fn trailing_slash_is_normalized() {
 }
 
 #[test]
-fn first_matching_pattern_wins() {
+fn more_specific_pattern_wins() {
+    // A static segment beats a :param at the same position (radix-tree
+    // priority), regardless of config order — the literal /a/b wins for /a/b,
+    // while /a/:x still catches everything else.
     let m = EndpointMatcher::new(&patterns(&["/a/:x", "/a/b"]));
-    assert_eq!(m.resolve("/a/b").as_deref(), Some("/a/:x"));
+    assert_eq!(m.resolve("/a/b").as_deref(), Some("/a/b"));
+    assert_eq!(m.resolve("/a/c").as_deref(), Some("/a/:x"));
+}
+
+#[test]
+fn hyphenated_param_names_are_accepted() {
+    // Mirrors the example config (`:order-id`): param names may contain hyphens.
+    let m = EndpointMatcher::new(&patterns(&["/api/v1/orders/:order-id/items/:item_id"]));
+    assert_eq!(
+        m.resolve("/api/v1/orders/7/items/99").as_deref(),
+        Some("/api/v1/orders/:order-id/items/:item_id")
+    );
+}
+
+#[test]
+fn duplicate_slashes_are_normalized() {
+    assert_eq!(
+        matcher().resolve("/api/v1//users//42").as_deref(),
+        Some("/api/v1/users/:id")
+    );
 }
 
 #[test]

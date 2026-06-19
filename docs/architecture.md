@@ -46,7 +46,7 @@ flowchart TD
 
     subgraph consumer ["Analysis consumer — single task (src/pipeline/consumer.rs)"]
         recv["recv AnalysisMessage"]
-        resolve["EndpointMatcher.resolve → Option<br/>:param template match, query stripped;<br/>unregistered path → drop, not analyzed (R35)<br/>(src/endpoint/mod.rs)"]
+        resolve["EndpointMatcher.resolve → Option<br/>matchit radix tree (R40); :param segment match,<br/>most specific template wins, slashes normalized, query stripped;<br/>unregistered path → drop, not analyzed (R35)<br/>(src/endpoint/mod.rs)"]
         baselineparse["parse baseline body:<br/>decode_body — gzip / x-gzip / deflate(zlib) / br / zstd<br/>via async-compression (R20) — then JSON parse;<br/>unparseable → skip request<br/>(src/pipeline/decode.rs, consumer.rs)"]
         statuscheck{"per upstream:<br/>responded with same<br/>status as baseline? (R23)"}
         diff["parse body, then flatten_value:<br/>diff → flatten to dot-paths<br/>raw = baseline vs candidate<br/>noise = baseline vs control<br/>(src/compare/)"]
@@ -183,7 +183,7 @@ one per request that produced diffs or a status mismatch:
 | `raw_fields` / `noise_fields` | JSON: `{ "<dot.path>": { "left"?, "right"?, "diff_type" } }` |
 | `baseline_status` | always present |
 | `candidate_status` / `control_status` | omitted when that upstream failed |
-| `request_curl` | replayable curl for the originating request (method, headers, body) with a `$RIFFY_TARGET` placeholder host; present only when the endpoint set `capture_request_curl`. Credential header values (`authorization`, `cookie`, …) are redacted unless `store_credentials_header`; `host`/`content-length`/hop-by-hop are dropped; bodies are inlined up to 64 KiB, else omitted with a comment (R38) |
+| `request_curl` | replayable curl for the originating request (method, headers, body) with a `$RIFFY_TARGET` placeholder host; present only when the endpoint set `capture_request_curl`. Credential header values (`authorization`, `cookie`, …) are redacted unless `store_credentials_header`; `host`/`content-length`/hop-by-hop are dropped; bodies are inlined up to 64 KiB, else omitted with a comment; all values are POSIX shell-quoted via `shell-escape` (R38) |
 
 `diff_type` is one of `primitive`, `missing_field`, `extra_field`, `seq_size`,
 `ordering`, `type_mismatch`, `status_mismatch` (`src/compare/flatten.rs`). A

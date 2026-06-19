@@ -9,9 +9,6 @@ use opentelemetry_sdk::Resource;
 
 pub mod timer;
 
-#[cfg(test)]
-mod tests;
-
 /// Install the global Prometheus recorder. Must be called once at startup.
 pub fn install_prometheus() -> anyhow::Result<metrics_exporter_prometheus::PrometheusHandle> {
     Ok(metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?)

@@ -8,6 +8,3 @@ pub mod metrics;
 pub mod query;
 pub mod router;
 pub mod ui;
-
-#[cfg(test)]
-mod tests;

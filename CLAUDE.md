@@ -122,7 +122,16 @@ Examples:
 
 ## Testing Strategy
 
-- Write **unit tests** for all pure logic (diff engine, flatten, endpoint matching, analysis calculations).
-- Write **integration tests** for the proxy handler and pipeline consumer.
+- **Test application logic and functionality only.** Cover the things that
+  encode behavior the product depends on: the diff engine, flatten, endpoint
+  matching, analysis calculations, config parsing/validation, storage round-trips,
+  the pipeline/consumer, and the curl renderer.
+- **Do NOT write tests for observability plumbing.** Metrics (Prometheus
+  counters/histograms, label shapes, the guarded timer) and traces (span/sampler
+  wiring) are not application logic — do not add unit tests for them. This extends
+  to any similar cross-cutting instrumentation whose only job is to report on the
+  system rather than implement its behavior.
+- Write **unit tests** for pure logic and **integration tests** for the proxy
+  handler and pipeline consumer.
 - Tests live in separate files — never co-located with implementation code.
 - Use `make test` to run the full suite.
