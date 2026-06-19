@@ -140,11 +140,17 @@ async fn main() -> anyhow::Result<()> {
     // Admin server (healthz + metrics + diff query API). The query API applies
     // the per-endpoint classifiers at read time to derive regressions from the
     // stored raw counts.
+    let upstreams = Arc::new(riffy::http::query::UpstreamTargets::from_addresses(
+        &cfg.upstream.baseline,
+        &cfg.upstream.candidate,
+        &cfg.upstream.control,
+    ));
     let admin_app = admin_router(AdminState {
         metrics: metrics_handle,
         store,
         classifiers,
         counters: collector,
+        upstreams,
     });
     let admin_addr = format!("{}:{}", cfg.server.address, cfg.server.admin_port);
     let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;

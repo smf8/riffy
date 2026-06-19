@@ -30,6 +30,7 @@ fn entry(endpoint: &str, raw_path: Option<&str>, left: &str, right: &str) -> Dif
         baseline_status: 200,
         candidate_status: Some(200),
         control_status: Some(200),
+        request_curl: None,
     }
 }
 
@@ -147,6 +148,30 @@ async fn recent_samples_paginate_newest_first() {
     let empty = store.recent_samples("/e", "missing", 10, 0).await.unwrap();
     assert!(empty.items.is_empty());
     assert!(!empty.has_more);
+}
+
+#[tokio::test]
+async fn recent_samples_carry_request_curl() {
+    let store = InMemoryDiffStore::new();
+
+    let mut with_curl = entry("/e", Some("x"), "l", "r");
+    with_curl.request_curl = Some("curl -X GET '$RIFFY_TARGET/x'".to_owned());
+    store.append_diff(&with_curl).await.unwrap();
+
+    // An entry captured without a curl carries None.
+    store
+        .append_diff(&entry("/e", Some("x"), "l2", "r2"))
+        .await
+        .unwrap();
+
+    let page = store.recent_samples("/e", "x", 10, 0).await.unwrap();
+    assert_eq!(page.items.len(), 2);
+    // Newest first: the no-curl entry, then the one with the curl.
+    assert_eq!(page.items[0].request_curl, None);
+    assert_eq!(
+        page.items[1].request_curl.as_deref(),
+        Some("curl -X GET '$RIFFY_TARGET/x'")
+    );
 }
 
 #[tokio::test]

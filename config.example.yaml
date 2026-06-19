@@ -31,6 +31,15 @@ upstream:
 #   Sampled-out requests are still proxied (baseline only); candidate/control
 #   fan-out and analysis are skipped. Use this to reduce upstream load on
 #   high-traffic endpoints.
+#
+# capture_request_curl: store the originating request as a replayable curl
+#   command on each diff entry (default false). Persists request headers/body to
+#   storage, so it is opt-in per endpoint. The stored curl uses a $RIFFY_TARGET
+#   placeholder host; the dashboard substitutes baseline/candidate/control.
+# store_credentials_header: store credential header values verbatim (default
+#   false). When false, credential headers (authorization, cookie,
+#   proxy-authorization, x-api-key, x-auth-token) are listed but their values
+#   are redacted. Only meaningful when capture_request_curl is true.
 endpoints:
   - pattern: "/api/v1/users/:id"
     threshold:
@@ -41,6 +50,8 @@ endpoints:
       - "meta.*"         # glob:  suppresses all direct children of meta
       - "items.*.ts"     # glob:  suppresses the ts field in each items element
     sample_rate: 0.5     # analyze 50% of requests
+    capture_request_curl: true       # store a replayable curl per diff
+    store_credentials_header: false  # redact auth/cookie values (default)
   - pattern: "/api/v1/orders/:order-id/items/:item_id"
   - pattern: "/api/v1/health"
 

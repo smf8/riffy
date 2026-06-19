@@ -38,7 +38,7 @@ flowchart TD
 
     subgraph background ["Background task, one per request (src/http/forward.rs)"]
         fanout["tokio::join!<br/>CANDIDATE + CONTROL in parallel<br/>(src/upstream/client.rs)"]
-        send["try_send AnalysisMessage<br/>bounded mpsc, capacity = pipeline.channel-capacity<br/>(default 1024, R32); drop newest + warn when full (R12)<br/>(src/pipeline/mod.rs)"]
+        send["try_send AnalysisMessage<br/>bounded mpsc, capacity = pipeline.channel-capacity<br/>(default 1024, R32); drop newest + warn when full (R12);<br/>carries an optional RequestSnapshot when the endpoint set<br/>capture_request_curl — assembled here, off the hot path (R38)<br/>(src/pipeline/mod.rs)"]
         fanout --> send
     end
 
@@ -53,7 +53,7 @@ flowchart TD
         nodiff[":status pseudo-field (StatusMismatch);<br/>body not compared — the status divergence<br/>is itself the signal (R23/R36)"]
         record["LiveCounters.record<br/>DashMap + AtomicU64 write buffer:<br/>endpoint total, per-field raw / noise<br/>(src/analysis/counters.rs)"]
         decide{"any raw/noise diffs?<br/>(incl. the :status field)"}
-        entry["DiffEntry (R13)"]
+        entry["DiffEntry (R13);<br/>renders request_curl from the snapshot<br/>($RIFFY_TARGET placeholder host, R38)<br/>(src/pipeline/curl.rs)"]
         skip(["no stream entry —<br/>only counters moved"])
         recv --> resolve --> baselineparse --> statuscheck
         statuscheck -- "yes" --> diff --> record
@@ -82,8 +82,9 @@ acyclic: the ticker is an independent root, not a back-edge.
 
 ## Admin server (observability + query API)
 
-The admin server carries `AdminState { metrics, store, classifiers, counters }`
-(R29/R31/R33); `FromRef` hands each route only the substate it needs. The query
+The admin server carries
+`AdminState { metrics, store, classifiers, counters, upstreams }`
+(R29/R31/R33/R38); `FromRef` hands each route only the substate it needs. The query
 API reads the same `DiffStore` the consumer writes to, so it reflects the
 periodic aggregation snapshots (staleness ≤ the aggregation interval) and the
 per-request stream. A minimal Alpine.js dashboard is served at `GET /` (HTML +
@@ -101,6 +102,7 @@ flowchart LR
         paths["GET /diffs/paths[?endpoint=]<br/>endpoints → diffing field paths<br/>(src/http/query.rs)"]
         detail["GET /diffs/detail?endpoint=&path=<br/>raw counts + paginated samples;<br/>per-endpoint classifier applied at read time (R31/R33)<br/>(src/http/query.rs)"]
         reset["DELETE /diffs?endpoint=<br/>clear an endpoint's aggregation + live buffer (R33)<br/>(src/http/query.rs)"]
+        ups["GET /upstreams<br/>scheme-normalized baseline/candidate/control bases;<br/>UI substitutes them for $RIFFY_TARGET in a captured curl (R38)<br/>(src/http/query.rs)"]
     end
 
     paths -. "get/list_aggregations" .-> readstore
@@ -131,6 +133,11 @@ keys + SREM the index).
 | `GET /diffs/paths?endpoint=<ep>` | one `{ endpoint, total, paths[], last_updated }`; 404 if unknown |
 | `GET /diffs/detail?endpoint=&path=` | `{ endpoint, path, total, raw_count, noise_count, is_regression, relative_difference, absolute_difference, last_updated, samples }` (`is_regression`/percentages computed at read time from the stored counts); `samples = { items[], limit, offset, has_more }`, newest-first; 404 if nothing recorded for that endpoint+path. `limit` default 20 / max 100 |
 | `DELETE /diffs?endpoint=<ep>` | clears the endpoint's stored aggregation counts and its live counter buffer; `204` on success, `404` if the endpoint has no recorded statistics. Samples age out via the stream cap, not purged here (R33) |
+| `GET /upstreams` | `{ baseline, candidate, control }` — scheme-normalized upstream base URLs, so the dashboard can replace the `$RIFFY_TARGET` placeholder in a captured curl with the chosen upstream (R38) |
+
+Each `DiffSample` in `/diffs/detail` additionally carries `request_curl` (a
+replayable curl with a `$RIFFY_TARGET` placeholder host), present only when the
+endpoint enabled `capture_request_curl` (R38).
 
 | Metric | Labels | Emitted from |
 |--------|--------|--------------|
@@ -170,6 +177,7 @@ one per request that produced diffs or a status mismatch:
 | `raw_fields` / `noise_fields` | JSON: `{ "<dot.path>": { "left"?, "right"?, "diff_type" } }` |
 | `baseline_status` | always present |
 | `candidate_status` / `control_status` | omitted when that upstream failed |
+| `request_curl` | replayable curl for the originating request (method, headers, body) with a `$RIFFY_TARGET` placeholder host; present only when the endpoint set `capture_request_curl`. Credential header values (`authorization`, `cookie`, …) are redacted unless `store_credentials_header`; `host`/`content-length`/hop-by-hop are dropped; bodies are inlined up to 64 KiB, else omitted with a comment (R38) |
 
 `diff_type` is one of `primitive`, `missing_field`, `extra_field`, `seq_size`,
 `ordering`, `type_mismatch`, `status_mismatch` (`src/compare/flatten.rs`). A
@@ -198,7 +206,10 @@ the most recent `storage.window` of traffic (R37).
 1. **Hot path is sacred (R2):** nothing between "request received" and "baseline
    response returned" may block on, wait for, or compute analysis. Candidate
    and control calls, decoding, diffing, and Redis I/O all live behind
-   `tokio::spawn` + the mpsc channel.
+   `tokio::spawn` + the mpsc channel. Request capture (R38) is no exception: the
+   `RequestSnapshot` is assembled inside the background task (reusing values
+   already cloned for the fan-out) and the curl string is rendered in the
+   consumer, only for diffs that are stored.
 2. **The client always receives the baseline response (Q13/R3).** There is no
    response-mode configuration.
 3. **Mutating methods (POST/PUT/PATCH/DELETE) are blocked before any upstream

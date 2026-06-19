@@ -1,3 +1,4 @@
+use super::query::UpstreamTargets;
 use super::{forward, query, ui};
 use crate::analysis::classify::EndpointClassifiers;
 use crate::analysis::counters::LiveCounters;
@@ -40,6 +41,9 @@ pub struct AdminState {
     pub store: Arc<dyn DiffStore>,
     pub classifiers: Arc<EndpointClassifiers>,
     pub counters: Arc<LiveCounters>,
+    /// Upstream base URLs, surfaced via `GET /upstreams` so the dashboard can
+    /// substitute the `$RIFFY_TARGET` placeholder in a captured curl.
+    pub upstreams: Arc<UpstreamTargets>,
 }
 
 impl FromRef<AdminState> for Option<PrometheusHandle> {
@@ -66,6 +70,12 @@ impl FromRef<AdminState> for Arc<LiveCounters> {
     }
 }
 
+impl FromRef<AdminState> for Arc<UpstreamTargets> {
+    fn from_ref(state: &AdminState) -> Self {
+        state.upstreams.clone()
+    }
+}
+
 /// Admin router: health check, Prometheus metrics, and the diff query API.
 /// `/metrics` renders an empty body when metrics are disabled (no handle
 /// installed).
@@ -78,6 +88,7 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/diffs/paths", get(query::list_paths))
         .route("/diffs/detail", get(query::diff_detail))
         .route("/diffs", delete(query::reset_stats))
+        .route("/upstreams", get(query::upstreams))
         .with_state(state)
 }
 

@@ -21,6 +21,8 @@ fn endpoint(pattern: &str, suppress: &[&str]) -> EndpointConfig {
         threshold: Default::default(),
         suppress_paths: suppress.iter().map(|s| s.to_string()).collect(),
         sample_rate: 1.0,
+        capture_request_curl: false,
+        store_credentials_header: false,
     }
 }
 

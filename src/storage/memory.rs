@@ -182,6 +182,7 @@ impl DiffStore for InMemoryDiffStore {
                 timestamp: entry.timestamp,
                 raw,
                 noise,
+                request_curl: entry.request_curl.clone(),
             });
             if matches.len() >= want {
                 break;

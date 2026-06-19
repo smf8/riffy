@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::curl::build_curl;
 use super::decode::decode_body;
 use super::AnalysisMessage;
 use crate::analysis::counters::LiveCounters;
@@ -117,6 +118,9 @@ impl Consumer {
             baseline_status,
             candidate_status,
             control_status,
+            // Rendered here (off the hot path) only for diffs we actually store,
+            // and only when the endpoint enabled capture.
+            request_curl: msg.request.as_ref().map(build_curl),
         };
 
         // Store failures are non-fatal: log and keep consuming.

@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::error::AppError;
 use crate::http::router::AppState;
-use crate::pipeline::AnalysisMessage;
+use crate::pipeline::{AnalysisMessage, RequestSnapshot};
 use crate::telemetry::metrics::{ResolvedEndpoint, UpstreamTimer, UNMATCHED_ENDPOINT};
 use axum::body::Bytes;
 use axum::extract::State;
@@ -90,19 +90,24 @@ pub async fn forward(
         return Ok(client_response.into_response());
     };
 
-    // Sampling: skip fan-out when this endpoint's sample_rate < 1.0 and the
-    // random draw falls outside the keep window. sample_rate=0.0 always skips;
-    // sample_rate=1.0 bypasses the RNG entirely.
-    let sample_rate = state
+    // Resolve this endpoint's config once: the sample rate and the request-curl
+    // capture settings.
+    let ep_cfg = state
         .config
         .endpoints
         .iter()
-        .find(|e| e.pattern == endpoint_key.as_ref())
-        .map(|e| e.sample_rate)
-        .unwrap_or(1.0);
+        .find(|e| e.pattern == endpoint_key.as_ref());
+
+    // Sampling: skip fan-out when this endpoint's sample_rate < 1.0 and the
+    // random draw falls outside the keep window. sample_rate=0.0 always skips;
+    // sample_rate=1.0 bypasses the RNG entirely.
+    let sample_rate = ep_cfg.map(|e| e.sample_rate).unwrap_or(1.0);
     if sample_rate < 1.0 && rand::random::<f64>() >= sample_rate {
         return Ok(client_response.into_response());
     }
+
+    let capture_request_curl = ep_cfg.map(|e| e.capture_request_curl).unwrap_or(false);
+    let store_credentials_header = ep_cfg.map(|e| e.store_credentials_header).unwrap_or(false);
 
     let upstream = state.upstream.clone();
     let analysis_tx = state.analysis_tx.clone();
@@ -116,7 +121,7 @@ pub async fn forward(
     tokio::spawn(
         async move {
             let candidate_body = body.clone();
-            let control_body = body;
+            let control_body = body.clone();
 
             let candidate_future = async {
                 let timer = UpstreamTimer::start("candidate", endpoint_key.clone());
@@ -157,12 +162,26 @@ pub async fn forward(
                 tracing::warn!(error = %e, "control upstream failed");
             }
 
+            // Capture the originating request once the upstream calls have
+            // released their borrows of the cloned method/headers/path. This is
+            // already off the hot path (inside the spawned task); the curl
+            // string itself is rendered later in the consumer, only for diffs
+            // that are stored.
+            let request = capture_request_curl.then(move || RequestSnapshot {
+                method: method_clone,
+                path_and_query: path_and_query_owned,
+                headers: headers_clone,
+                body,
+                redact_credentials: !store_credentials_header,
+            });
+
             let msg = AnalysisMessage {
                 path: path_owned,
                 received_at,
                 baseline_response,
                 candidate_response: candidate_result.ok(),
                 control_response: control_result.ok(),
+                request,
             };
 
             // try_send sheds load when the consumer lags instead of queueing

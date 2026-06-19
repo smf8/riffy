@@ -10,6 +10,7 @@ use chrono::Utc;
 use riffy::analysis::classify::EndpointClassifiers;
 use riffy::analysis::counters::LiveCounters;
 use riffy::compare::flatten::{DiffType, FieldDiff};
+use riffy::http::query::UpstreamTargets;
 use riffy::http::router::{admin_router, AdminState};
 use riffy::storage::{
     DiffEntry, DiffStore, EndpointAggregation, FieldAggregation, InMemoryDiffStore,
@@ -24,6 +25,11 @@ async fn spawn_admin(store: Arc<dyn DiffStore>) -> SocketAddr {
         // diffy-default classifier (relative 20%, absolute 0.03%).
         classifiers: Arc::new(EndpointClassifiers::from_config(&[])),
         counters: Arc::new(LiveCounters::new()),
+        upstreams: Arc::new(UpstreamTargets::from_addresses(
+            "baseline:9100",
+            "https://candidate:9000",
+            "http://control:9200",
+        )),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -145,6 +151,7 @@ async fn diff_detail_returns_stats_and_paginated_samples() {
                 baseline_status: 200,
                 candidate_status: Some(200),
                 control_status: Some(200),
+                request_curl: Some(format!("curl -X GET '$RIFFY_TARGET/api/v1/users/{i}'")),
             })
             .await
             .unwrap();
@@ -172,6 +179,11 @@ async fn diff_detail_returns_stats_and_paginated_samples() {
     assert_eq!(items.len(), 2);
     assert_eq!(body["samples"]["has_more"], true);
     assert_eq!(items[0]["raw"]["right"], "bob2");
+    // The captured curl rides on each sample, newest-first.
+    assert_eq!(
+        items[0]["request_curl"],
+        "curl -X GET '$RIFFY_TARGET/api/v1/users/2'"
+    );
 
     // Second page.
     let body: Value = client
@@ -233,6 +245,27 @@ async fn status_field_flags_regression_below_thresholds() {
         .await
         .unwrap();
     assert_eq!(body["is_regression"], true);
+}
+
+#[tokio::test]
+async fn upstreams_returns_scheme_normalized_bases() {
+    let store = Arc::new(InMemoryDiffStore::new());
+    let addr = spawn_admin(store).await;
+    let client = http_client();
+
+    let body: Value = client
+        .get(format!("http://{addr}/upstreams"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // A bare address gets http://; explicit schemes are preserved.
+    assert_eq!(body["baseline"], "http://baseline:9100");
+    assert_eq!(body["candidate"], "https://candidate:9000");
+    assert_eq!(body["control"], "http://control:9200");
 }
 
 #[tokio::test]

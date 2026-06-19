@@ -76,6 +76,9 @@ impl DiffStore for RedisDiffStore {
         if let Some(status) = entry.control_status {
             fields.push(("control_status", status.to_string()));
         }
+        if let Some(curl) = &entry.request_curl {
+            fields.push(("request_curl", curl.clone()));
+        }
 
         // ConnectionManager is a cheap clonable handle to one multiplexed connection.
         // Approximate trimming (`~`) lets Redis trim in whole macro-nodes, far
@@ -373,10 +376,13 @@ fn sample_from_entry(
         None => return Ok(None),
     };
 
+    let request_curl = stream_field(&entry.map, "request_curl")?;
+
     Ok(Some(DiffSample {
         timestamp,
         raw,
         noise,
+        request_curl,
     }))
 }
 

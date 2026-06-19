@@ -133,6 +133,19 @@ pub struct EndpointConfig {
     #[garde(range(min = 0.0, max = 1.0))]
     #[serde(default = "default_sample_rate")]
     pub sample_rate: f64,
+    /// Capture the originating request as a replayable curl command on each
+    /// stored diff entry (default off). Persists request headers/body to
+    /// storage, so it is opt-in per endpoint.
+    #[garde(skip)]
+    #[serde(default)]
+    pub capture_request_curl: bool,
+    /// Store credential header values verbatim in the captured curl (default
+    /// off). When off, credential headers (authorization, cookie, …) are still
+    /// listed but their values are redacted. Only meaningful when
+    /// `capture_request_curl` is set.
+    #[garde(skip)]
+    #[serde(default)]
+    pub store_credentials_header: bool,
 }
 
 /// Storage for diffs and aggregation snapshots. `aggregation-interval` and

@@ -6,10 +6,10 @@ use crate::analysis::suppress::EndpointSuppressPaths;
 use crate::config::EndpointConfig;
 use crate::endpoint::EndpointMatcher;
 use crate::pipeline::consumer::Consumer;
-use crate::pipeline::AnalysisMessage;
+use crate::pipeline::{AnalysisMessage, RequestSnapshot};
 use crate::storage::InMemoryDiffStore;
 use crate::upstream::client::UpstreamResponse;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, Method};
 use bytes::Bytes;
 
 fn response(status: u16, body: &str) -> UpstreamResponse {
@@ -32,6 +32,7 @@ fn message(
         baseline_response: response(200, baseline),
         candidate_response: candidate.map(|b| response(200, b)),
         control_response: control.map(|b| response(200, b)),
+        request: None,
     }
 }
 
@@ -294,6 +295,8 @@ async fn suppressed_path_is_excluded_from_diffs() {
         threshold: Default::default(),
         suppress_paths: vec!["name".to_owned()],
         sample_rate: 1.0,
+        capture_request_curl: false,
+        store_credentials_header: false,
     }];
 
     let store = run_consumer_with_endpoints(
@@ -318,6 +321,8 @@ async fn suppressed_prefix_removes_subtree() {
         threshold: Default::default(),
         suppress_paths: vec!["meta".to_owned()],
         sample_rate: 1.0,
+        capture_request_curl: false,
+        store_credentials_header: false,
     }];
 
     let store = run_consumer_with_endpoints(
@@ -342,6 +347,8 @@ async fn unsuppressed_sibling_is_still_recorded() {
         threshold: Default::default(),
         suppress_paths: vec!["name".to_owned()],
         sample_rate: 1.0,
+        capture_request_curl: false,
+        store_credentials_header: false,
     }];
 
     let store = run_consumer_with_endpoints(
@@ -370,6 +377,8 @@ async fn wildcard_suppress_path_filters_indexed_fields() {
         threshold: Default::default(),
         suppress_paths: vec!["items.*.id".to_owned()],
         sample_rate: 1.0,
+        capture_request_curl: false,
+        store_credentials_header: false,
     }];
 
     let store = run_consumer_with_endpoints(
@@ -393,4 +402,45 @@ async fn wildcard_suppress_path_filters_indexed_fields() {
     assert!(!entries[0].raw_fields.contains_key("items.1.id"));
     // name diff is still present.
     assert!(entries[0].raw_fields.contains_key("items.0.name"));
+}
+
+#[tokio::test]
+async fn captured_request_renders_curl_on_stored_entry() {
+    let mut msg = message(
+        "/api/v1/users/1",
+        r#"{"v": 1}"#,
+        Some(r#"{"v": 2}"#),
+        Some(r#"{"v": 1}"#),
+    );
+    msg.request = Some(RequestSnapshot {
+        method: Method::GET,
+        path_and_query: "/api/v1/users/1?debug=1".to_owned(),
+        headers: HeaderMap::new(),
+        body: Bytes::new(),
+        redact_credentials: true,
+    });
+
+    let store = run_consumer(vec![msg]).await;
+
+    let entries = store.entries().await;
+    assert_eq!(entries.len(), 1);
+    let curl = entries[0].request_curl.as_ref().expect("curl captured");
+    assert!(curl.starts_with("curl -X GET"));
+    assert!(curl.contains("'$RIFFY_TARGET/api/v1/users/1?debug=1'"));
+}
+
+#[tokio::test]
+async fn no_snapshot_means_no_curl() {
+    // The default `message` helper carries `request: None`.
+    let store = run_consumer(vec![message(
+        "/api/v1/users/1",
+        r#"{"v": 1}"#,
+        Some(r#"{"v": 2}"#),
+        Some(r#"{"v": 1}"#),
+    )])
+    .await;
+
+    let entries = store.entries().await;
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].request_curl.is_none());
 }

@@ -165,6 +165,42 @@ pub async fn diff_detail(
     .into_response())
 }
 
+/// The three upstream base URLs (scheme-normalized) the dashboard substitutes
+/// for the `$RIFFY_TARGET` placeholder in a captured curl.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpstreamTargets {
+    pub baseline: String,
+    pub candidate: String,
+    pub control: String,
+}
+
+impl UpstreamTargets {
+    /// Normalize each address the same way the upstream client does: an
+    /// explicit scheme is honored, otherwise `http://` is assumed — so the
+    /// returned bases are directly usable as a curl URL prefix.
+    pub fn from_addresses(baseline: &str, candidate: &str, control: &str) -> Self {
+        Self {
+            baseline: normalize_base(baseline),
+            candidate: normalize_base(candidate),
+            control: normalize_base(control),
+        }
+    }
+}
+
+fn normalize_base(addr: &str) -> String {
+    if addr.contains("://") {
+        addr.to_owned()
+    } else {
+        format!("http://{addr}")
+    }
+}
+
+/// `GET /upstreams` — the three upstream base URLs, for placeholder
+/// substitution in the dashboard's captured-curl view.
+pub async fn upstreams(State(targets): State<Arc<UpstreamTargets>>) -> Json<UpstreamTargets> {
+    Json((*targets).clone())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ResetQuery {
     pub endpoint: String,

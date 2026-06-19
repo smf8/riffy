@@ -23,6 +23,8 @@ fn valid_config() -> Riffy {
             },
             suppress_paths: vec![],
             sample_rate: 1.0,
+            capture_request_curl: false,
+            store_credentials_header: false,
         }],
         storage: Storage {
             aggregation_interval: Duration::from_secs(1),

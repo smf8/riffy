@@ -45,6 +45,13 @@
              letter-spacing:.03em; white-space:nowrap; }
     .pager { display:flex; align-items:center; gap:.8rem; margin-top:.7rem; }
     .muted { color:var(--muted); }
+    .target-bar { display:flex; align-items:center; gap:.5rem; margin:1.1rem 0 .4rem; }
+    .target-bar select { font:inherit; color:var(--fg); background:var(--panel);
+                         border:1px solid var(--line); border-radius:6px; padding:.2rem .4rem; }
+    .curl-actions { display:flex; gap:.4rem; align-items:center; }
+    pre.curl { margin:.4rem 0 0; padding:.5rem .6rem; background:var(--panel); border:1px solid var(--line);
+               border-radius:6px; white-space:pre-wrap; word-break:break-all; font-size:.78rem;
+               font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
   </style>
 </head>
 <body>
@@ -99,8 +106,17 @@
             </table>
 
             <h3>Samples</h3>
+            <div class="target-bar">
+              <span class="muted">replay target</span>
+              <select x-model="target">
+                <option value="baseline">baseline</option>
+                <option value="candidate">candidate</option>
+                <option value="control">control</option>
+              </select>
+              <span class="muted" x-text="upstreams[target] || '$RIFFY_TARGET'"></span>
+            </div>
             <table class="samples">
-              <thead><tr><th>timestamp</th><th>raw (baseline → candidate)</th><th>noise (baseline → control)</th></tr></thead>
+              <thead><tr><th>timestamp</th><th>raw (baseline → candidate)</th><th>noise (baseline → control)</th><th>request</th></tr></thead>
               <tbody>
                 <template x-for="(s, i) in detail.samples.items" :key="i">
                   <tr>
@@ -116,6 +132,19 @@
                         <span><span class="dtype" x-text="dlabel(s.noise)"></span><span x-text="diffValue(s.noise)"></span></span>
                       </template>
                       <template x-if="!s.noise"><span class="muted">—</span></template>
+                    </td>
+                    <td>
+                      <template x-if="s.request_curl">
+                        <div>
+                          <div class="curl-actions">
+                            <button @click="copyCurl(s)">copy curl</button>
+                            <button @click="openCurl = (openCurl === i ? null : i)"
+                                    x-text="openCurl === i ? 'hide' : 'show'"></button>
+                          </div>
+                          <pre class="curl" x-show="openCurl === i" x-text="curlFor(s)" x-cloak></pre>
+                        </div>
+                      </template>
+                      <template x-if="!s.request_curl"><span class="muted">—</span></template>
                     </td>
                   </tr>
                 </template>
@@ -146,8 +175,18 @@
         limit: 20,
         offset: 0,
         error: '',
+        upstreams: {},
+        target: 'candidate',
+        openCurl: null,
 
-        async init() { await this.loadEndpoints(); },
+        async init() { await this.loadEndpoints(); await this.loadUpstreams(); },
+
+        async loadUpstreams() {
+          try {
+            const r = await fetch('/upstreams');
+            if (r.ok) this.upstreams = await r.json();
+          } catch (e) { /* placeholder host stays in the curl if this fails */ }
+        },
 
         async loadEndpoints() {
           this.error = '';
@@ -171,6 +210,7 @@
         async loadDetail() {
           if (!this.selected || !this.path) return;
           this.error = '';
+          this.openCurl = null;
           try {
             const u = new URL('/diffs/detail', location.origin);
             u.searchParams.set('endpoint', this.selected.endpoint);
@@ -237,6 +277,24 @@
         // JSON.stringify keeps types visible: strings quoted, null as "null",
         // objects/arrays as compact JSON.
         fmt(v) { return JSON.stringify(v); },
+
+        // The stored curl with its $RIFFY_TARGET placeholder replaced by the
+        // selected upstream base (or left as the placeholder if unknown).
+        curlFor(s) {
+          const base = this.upstreams[this.target] || '$RIFFY_TARGET';
+          return (s.request_curl || '').split('$RIFFY_TARGET').join(base);
+        },
+
+        async copyCurl(s) {
+          const text = this.curlFor(s);
+          try {
+            await navigator.clipboard.writeText(text);
+          } catch (e) {
+            // No clipboard (insecure context): reveal the command for manual copy.
+            this.openCurl = this.detail.samples.items.indexOf(s);
+            this.error = 'clipboard unavailable — copy the command manually';
+          }
+        },
       }));
     });
   </script>

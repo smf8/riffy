@@ -34,6 +34,10 @@ pub struct DiffEntry {
     pub baseline_status: u16,
     pub candidate_status: Option<u16>,
     pub control_status: Option<u16>,
+    /// Replayable curl command for the originating request, with a
+    /// `$RIFFY_TARGET` placeholder host. `Some` only when the endpoint enabled
+    /// `capture_request_curl`.
+    pub request_curl: Option<String>,
 }
 
 /// Per-endpoint counter aggregation. Used in two directions with the same
@@ -118,6 +122,10 @@ pub struct DiffSample {
     pub raw: Option<FieldDiff>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub noise: Option<FieldDiff>,
+    /// Replayable curl for the request that produced this sample (placeholder
+    /// host). `None` when capture was disabled for the endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_curl: Option<String>,
 }
 
 /// A newest-first page of `DiffSample`s for one endpoint + field path.

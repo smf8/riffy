@@ -141,6 +141,28 @@ endpoints:
 }
 
 #[test]
+fn capture_request_curl_flags_parse_and_default_to_false() {
+    let yaml = r#"
+upstream:
+  baseline: "http://localhost:9100"
+  control: "http://localhost:9200"
+  candidate: "http://localhost:9000"
+endpoints:
+  - pattern: "/a/:id"
+    capture_request_curl: true
+    store_credentials_header: true
+  - pattern: "/b"
+"#;
+    let cfg = parse(yaml);
+
+    assert!(cfg.endpoints[0].capture_request_curl);
+    assert!(cfg.endpoints[0].store_credentials_header);
+    // Omitted on the second endpoint — both default to false.
+    assert!(!cfg.endpoints[1].capture_request_curl);
+    assert!(!cfg.endpoints[1].store_credentials_header);
+}
+
+#[test]
 fn cli_overrides_supply_required_fields() {
     // Embedded defaults + CLI args only (no config file) is enough to run.
     let cli = CliOverrides {

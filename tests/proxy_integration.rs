@@ -56,6 +56,8 @@ fn test_config() -> Riffy {
             },
             suppress_paths: vec![],
             sample_rate: 1.0,
+            capture_request_curl: false,
+            store_credentials_header: false,
         }],
         // The proxy integration test drives the in-memory store directly.
         storage: Storage {
