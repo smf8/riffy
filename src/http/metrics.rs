@@ -19,22 +19,14 @@ use metrics_exporter_prometheus::PrometheusHandle;
 #[derive(Clone)]
 pub struct ResolvedEndpoint(pub Option<Arc<str>>);
 
-/// Metric label for requests whose path matched no configured endpoint
-/// template — bounds `endpoint` label cardinality (all such paths collapse here).
 pub const UNMATCHED_ENDPOINT: &str = "undefined";
 
-/// Admin-server handler rendering the Prometheus exposition text.
-/// Returns an empty body when metrics are disabled.
+
 pub async fn render_metrics(State(handle): State<Option<PrometheusHandle>>) -> String {
     handle.map(|h| h.render()).unwrap_or_default()
 }
 
-/// Proxy middleware: resolves the endpoint template once, exposes it to the
-/// handler, and records request count + duration exactly once — with the real
-/// status on completion, or `status="cancelled"` when the request future is
-/// dropped mid-flight. Metric calls are no-ops when no recorder is installed
-/// (metrics disabled).
-pub async fn track_proxy(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
+pub async fn endpoint_metric_middleware(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let resolved: Option<Arc<str>> = state.matcher.resolve(req.uri().path()).map(Arc::from);
     req.extensions_mut()
         .insert(ResolvedEndpoint(resolved.clone()));
@@ -49,11 +41,6 @@ pub async fn track_proxy(State(state): State<AppState>, mut req: Request, next: 
     response
 }
 
-/// Build the drop-guard timer for one proxied request. `finish` is called with
-/// the response status code (e.g. `"200"`); a dropped timer records
-/// `status="cancelled"`. The count and the duration are emitted together, so
-/// the duration includes abandoned requests (time until the client gave up)
-/// and carries no survivorship bias.
 pub(crate) fn proxy_request_timer(
     method: String,
     endpoint: Arc<str>,

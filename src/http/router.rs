@@ -4,7 +4,7 @@ use crate::analysis::classify::EndpointClassifiers;
 use crate::analysis::counters::LiveCounters;
 use crate::config::Riffy;
 use crate::endpoint::EndpointMatcher;
-use crate::http::metrics::{render_metrics, track_proxy};
+use crate::http::metrics::{render_metrics, endpoint_metric_middleware};
 use crate::pipeline::AnalysisMessage;
 use crate::storage::DiffStore;
 use crate::upstream::client::UpstreamClient;
@@ -27,7 +27,7 @@ pub struct AppState {
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .fallback(any(forward::forward))
-        .layer(middleware::from_fn_with_state(state.clone(), track_proxy))
+        .layer(middleware::from_fn_with_state(state.clone(), endpoint_metric_middleware))
         .with_state(state)
 }
 
