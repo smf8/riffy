@@ -174,6 +174,9 @@ installs the global recorder.
 | `riffy_sample_store_lag_seconds` | — | `src/pipeline/metrics.rs`, called by the consumer after a sample is stored |
 | `riffy_samples_stored_total` | endpoint | `src/pipeline/metrics.rs`, called by the consumer after a sample is stored |
 
+See `docs/metrics.md` for the Grafana/PromQL panel reference (including the
+histogram-exported-as-summary caveat that shapes every latency query).
+
 Request and upstream timings are recorded by the shared **`GuardedTimer`** drop
 guard (R21, `src/telemetry/timer.rs`): when a future is dropped at an `.await`
 (client disconnect, shutdown, panic unwind), the timer's `Drop` impl records the
