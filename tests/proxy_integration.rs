@@ -163,7 +163,7 @@ async fn wait_for_samples(store: &InMemorySampleStore) -> Vec<RawSample> {
 
 fn engine() -> DiffEngine {
     DiffEngine::new(
-        SuppressRules::from_config(&[]),
+        SuppressRules::from_config(&[]).unwrap(),
         EndpointClassifiers::from_config(&[]),
     )
 }
@@ -196,7 +196,9 @@ async fn client_gets_baseline_response_and_raw_sample_is_recorded() {
     assert!(s.candidate_body.is_some());
 
     // The diff (name) is derived at read time from the stored raw sample.
-    let counts = engine().aggregate(EP, &samples).unwrap();
+    let counts = engine()
+        .aggregate(EP, &samples, &SuppressRules::default())
+        .unwrap();
     assert!(counts.fields.contains_key("name"));
     assert!(!counts.fields.contains_key("version"));
 }
@@ -220,7 +222,9 @@ async fn identical_upstreams_still_record_a_sample() {
     // Producer records raw data unconditionally; the read-time diff finds nothing.
     let samples = wait_for_samples(&proxy.store).await;
     assert_eq!(samples.len(), 1);
-    let counts = engine().aggregate(EP, &samples).unwrap();
+    let counts = engine()
+        .aggregate(EP, &samples, &SuppressRules::default())
+        .unwrap();
     assert!(counts.fields.is_empty());
 }
 

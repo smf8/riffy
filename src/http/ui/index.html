@@ -7,14 +7,14 @@
   <script defer src="/alpine.js"></script>
   <style>
     :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#d7dce5; --muted:#8b94a7;
-            --accent:#5b9dff; --bad:#ff5b6e; --ok:#34d17b; }
+            --accent:#5b9dff; --bad:#ff5b6e; --ok:#34d17b; --warn:#ffb454; }
     * { box-sizing: border-box; }
     body { margin:0; font:14px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
     header { display:flex; align-items:baseline; gap:.6rem; padding:.8rem 1.1rem; border-bottom:1px solid var(--line); }
     header h1 { margin:0; font-size:1.1rem; }
     header span { color:var(--muted); }
     .error { margin:.6rem 1.1rem; padding:.5rem .7rem; background:#3a1620; color:var(--bad); border-radius:6px; }
-    main { display:grid; grid-template-columns: 320px 220px 1fr; gap:1px; background:var(--line);
+    main { display:grid; grid-template-columns: 320px 320px 1fr; gap:1px; background:var(--line);
            min-height: calc(100vh - 53px); }
     section { background:var(--bg); padding:.9rem 1.1rem; overflow:auto; }
     h2 { font-size:.95rem; margin:.1rem 0 .7rem; }
@@ -24,14 +24,20 @@
     .endpoints li.active, .endpoints li:hover { background:var(--panel); }
     .endpoints .ep { flex:1; cursor:pointer; word-break:break-all; }
     .endpoints .total { color:var(--muted); font-variant-numeric:tabular-nums; }
-    .paths li { padding:.3rem .4rem; border-radius:6px; cursor:pointer; word-break:break-all; }
-    .paths li:hover { background:var(--panel); }
+    .paths .row { display:flex; align-items:center; gap:.5rem; padding:.3rem .4rem; border-radius:6px; }
+    .paths .row:hover { background:var(--panel); }
+    .paths .row.active { background:var(--panel); }
+    .paths .p { flex:1; cursor:pointer; word-break:break-all; }
+    .paths .p.reg { color:var(--bad); }
+    .counts { color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; font-size:.8rem; }
+    .counts .n { color:var(--warn); }
     button { font:inherit; color:var(--fg); background:var(--panel); border:1px solid var(--line);
              border-radius:6px; padding:.2rem .55rem; cursor:pointer; }
     button:hover:not(:disabled) { border-color:var(--accent); }
     button:disabled { opacity:.4; cursor:default; }
     button.reset { color:var(--bad); border-color:transparent; padding:.15rem .45rem; }
-    .toolbar { margin-bottom:.7rem; }
+    .toolbar { display:flex; align-items:center; gap:.6rem; margin-bottom:.7rem; flex-wrap:wrap; }
+    label.chk { display:inline-flex; align-items:center; gap:.3rem; color:var(--muted); cursor:pointer; user-select:none; }
     table { border-collapse:collapse; width:100%; }
     th, td { text-align:left; padding:.35rem .5rem; border-bottom:1px solid var(--line); vertical-align:top; }
     table.stats th { color:var(--muted); width:9rem; font-weight:500; }
@@ -40,24 +46,37 @@
     .badge { font-size:.72rem; padding:.1rem .45rem; border-radius:999px; margin-left:.5rem; }
     .badge.bad { background:#3a1620; color:var(--bad); }
     .badge.ok  { background:#11321f; color:var(--ok); }
+    .badge.warn { background:#3a2a16; color:var(--warn); }
     .dtype { display:inline-block; font-size:.68rem; padding:.05rem .4rem; border-radius:999px;
              background:var(--line); color:var(--muted); margin-right:.5rem; text-transform:uppercase;
              letter-spacing:.03em; white-space:nowrap; }
     .pager { display:flex; align-items:center; gap:.8rem; margin-top:.7rem; }
     .muted { color:var(--muted); }
     .target-bar { display:flex; align-items:center; gap:.5rem; margin:1.1rem 0 .4rem; }
-    .target-bar select { font:inherit; color:var(--fg); background:var(--panel);
+    .target-bar select, select.sort { font:inherit; color:var(--fg); background:var(--panel);
                          border:1px solid var(--line); border-radius:6px; padding:.2rem .4rem; }
-    .curl-actions { display:flex; gap:.4rem; align-items:center; }
-    pre.curl { margin:.4rem 0 0; padding:.5rem .6rem; background:var(--panel); border:1px solid var(--line);
+    .curl-actions { display:flex; gap:.4rem; align-items:center; flex-wrap:wrap; }
+    pre.curl, pre.body { margin:.4rem 0 0; padding:.5rem .6rem; background:var(--panel); border:1px solid var(--line);
                border-radius:6px; white-space:pre-wrap; word-break:break-all; font-size:.78rem;
                font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+    pre.body { max-height:40vh; overflow:auto; }
     textarea.suppress { width:100%; min-height:5rem; resize:vertical; margin:.2rem 0 .5rem;
                background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px;
                padding:.4rem .5rem; font:.8rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .suppress-box { margin-top:1.1rem; border-top:1px solid var(--line); padding-top:.6rem; }
-    .suppress-box .row { display:flex; gap:.4rem; align-items:center; }
-    .suppress-box .saved { color:var(--ok); }
+    .box { margin-top:1.1rem; border-top:1px solid var(--line); padding-top:.6rem; }
+    .box .row2 { display:flex; gap:.4rem; align-items:center; flex-wrap:wrap; }
+    .saved { color:var(--ok); }
+    .preview-bar { margin:.5rem 0; padding:.5rem .6rem; background:var(--panel); border:1px solid var(--line);
+               border-radius:6px; display:flex; gap:.6rem; align-items:center; flex-wrap:wrap; }
+    /* modal */
+    .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.62); display:flex; align-items:flex-start;
+               justify-content:center; padding:4vh 2vw; z-index:50; }
+    .modal { background:var(--bg); border:1px solid var(--line); border-radius:10px; width:min(1150px,96%);
+               max-height:92vh; overflow:auto; padding:1rem 1.2rem; }
+    .modal .close { float:right; }
+    .cols3 { display:grid; grid-template-columns:repeat(3,1fr); gap:.8rem; }
+    .cols3 .col h4 { margin:.2rem 0 .3rem; font-size:.85rem; }
+    .st { font-variant-numeric:tabular-nums; }
   </style>
 </head>
 <body>
@@ -67,46 +86,82 @@
     </header>
     <p class="error" x-show="error" x-text="error" x-cloak></p>
     <main>
+      <!-- OVERVIEW: endpoints, failing first -->
       <section class="endpoints">
         <div class="toolbar">
           <button @click="loadEndpoints()">↻ refresh</button>
+          <label class="chk"><input type="checkbox" x-model="failingOnly"> failing only</label>
         </div>
         <h2>Endpoints</h2>
         <ul>
-          <template x-for="ep in endpoints" :key="ep.endpoint">
+          <template x-for="ep in visibleEndpoints()" :key="ep.endpoint">
             <li :class="{ active: selected && selected.endpoint === ep.endpoint }">
               <span class="ep" @click="select(ep)" x-text="ep.endpoint"></span>
+              <span class="badge bad" x-show="ep.regressions > 0"
+                    x-text="ep.regressions + ' ⚠'"></span>
               <span class="total" x-text="ep.total"></span>
               <button class="reset" title="clear statistics" @click="reset(ep.endpoint)">✕</button>
             </li>
           </template>
         </ul>
-        <p class="muted" x-show="endpoints.length === 0">No diffs recorded yet.</p>
+        <p class="muted" x-show="visibleEndpoints().length === 0">No matching endpoints.</p>
       </section>
 
+      <!-- DRILL: fields, noise view, suppress -->
       <section class="paths" x-show="selected" x-cloak>
-        <h2 x-text="selected && selected.endpoint"></h2>
+        <h2>
+          <span x-text="selected && selected.endpoint"></span>
+          <span class="badge bad" x-show="selected && selected.regressions > 0"
+                x-text="(selected ? selected.regressions : 0) + ' regressions'"></span>
+        </h2>
+        <div class="toolbar">
+          <label class="chk">sort
+            <select class="sort" x-model="pathSort">
+              <option value="field">by field</option>
+              <option value="noise">by noise</option>
+            </select>
+          </label>
+        </div>
+
         <ul>
-          <template x-for="p in (selected ? selected.paths : [])" :key="p">
-            <li :class="{ active: p === path }" @click="showDetail(p)" x-text="p"></li>
+          <template x-for="p in sortedPaths()" :key="p.path">
+            <li class="row" :class="{ active: p.path === path }">
+              <input type="checkbox" :checked="!!excludeSel[p.path]" @change="toggleExclude(p.path)"
+                     title="select as noise to preview/suppress">
+              <span class="p" :class="{ reg: p.is_regression }" @click="showDetail(p.path)" x-text="p.path"></span>
+              <span class="counts">raw <span x-text="p.raw_count"></span> · noise <span class="n" x-text="p.noise_count"></span></span>
+            </li>
           </template>
         </ul>
         <p class="muted" x-show="selected && selected.paths.length === 0">No diffing fields.</p>
 
-        <div class="suppress-box">
-          <h3>Suppress rules</h3>
-          <p class="muted" style="margin:.1rem 0 .4rem">One path per line. Plain path hides
-            it and its descendants; <code>*</code> matches one segment. Applied at read time.</p>
+        <!-- Re-check with noise excluded: preview (non-persisted), then save to suppress -->
+        <div class="preview-bar" x-show="selectedExcludes().length > 0" x-cloak>
+          <span class="muted" x-text="selectedExcludes().length + ' selected'"></span>
+          <button @click="previewExclude()">preview excluded</button>
+          <button @click="saveExcluded()">save to suppress</button>
+          <button class="reset" @click="clearExcluded()">clear</button>
+          <span class="muted" x-show="preview" x-cloak
+                x-text="preview ? ('→ regressions ' + preview.regressions + ' (now ' + (selected ? selected.regressions : 0) + ')') : ''"></span>
+        </div>
+
+        <div class="box">
+          <h3>Ignore rules (suppress)</h3>
+          <p class="muted" style="margin:.1rem 0 .4rem">One pattern per line, applied at read time.
+            Plain path hides it and its descendants; <code>*</code> matches one segment;
+            <code>re:&lt;regex&gt;</code> ignores a field (and its children) by regex —
+            e.g. <code>re:.*_at$</code>.</p>
           <textarea class="suppress" x-model="suppressText" spellcheck="false"
-                    placeholder="meta&#10;items.*.ts"></textarea>
-          <div class="row">
+                    placeholder="meta&#10;items.*.ts&#10;re:.*_at$"></textarea>
+          <div class="row2">
             <button @click="saveSuppress()">save rules</button>
-            <button class="reset" @click="clearSuppress()">clear</button>
+            <button class="reset" @click="clearSuppress()">clear all</button>
             <span class="saved muted" x-show="suppressSaved" x-cloak>saved ✓</span>
           </div>
         </div>
       </section>
 
+      <!-- DETAIL: per-field request diffs -->
       <section class="detail" x-show="detail" x-cloak>
         <template x-if="detail">
           <div>
@@ -135,9 +190,9 @@
               <span class="muted" x-text="upstreams[target] || '$RIFFY_TARGET'"></span>
             </div>
             <table class="samples">
-              <thead><tr><th>timestamp</th><th>raw (baseline → candidate)</th><th>noise (baseline → control)</th><th>request</th></tr></thead>
+              <thead><tr><th>timestamp</th><th>raw (baseline → candidate)</th><th>noise (baseline → control)</th><th>request</th><th></th></tr></thead>
               <tbody>
-                <template x-for="(s, i) in detail.samples.items" :key="i">
+                <template x-for="(s, i) in detail.samples.items" :key="s.id">
                   <tr>
                     <td class="ts" x-text="s.timestamp"></td>
                     <td>
@@ -160,11 +215,12 @@
                             <button @click="openCurl = (openCurl === i ? null : i)"
                                     x-text="openCurl === i ? 'hide' : 'show'"></button>
                           </div>
-                          <pre class="curl" x-show="openCurl === i" x-text="curlFor(s)" x-cloak></pre>
+                          <pre class="curl" x-show="openCurl === i" x-text="curlFor(s.request_curl)" x-cloak></pre>
                         </div>
                       </template>
                       <template x-if="!s.request_curl"><span class="muted">—</span></template>
                     </td>
+                    <td><button @click="inspect(s)">inspect</button></td>
                   </tr>
                 </template>
               </tbody>
@@ -182,15 +238,62 @@
         </template>
       </section>
     </main>
+
+    <!-- INSPECT MODAL: full request + raw responses -->
+    <div class="modal-bg" x-show="modal" x-cloak @click.self="closeModal()">
+      <div class="modal" x-show="modal">
+        <template x-if="modal">
+          <div>
+            <button class="close reset" @click="closeModal()">✕ close</button>
+            <h2>Request / response <span class="muted" x-text="modal.timestamp"></span></h2>
+
+            <template x-if="modal.request_curl">
+              <div>
+                <h3>Request</h3>
+                <div class="curl-actions">
+                  <span class="muted">replay target</span>
+                  <select x-model="target">
+                    <option value="baseline">baseline</option>
+                    <option value="candidate">candidate</option>
+                    <option value="control">control</option>
+                  </select>
+                  <button @click="copyText(curlFor(modal.request_curl))">copy curl</button>
+                </div>
+                <pre class="curl" x-text="curlFor(modal.request_curl)"></pre>
+              </div>
+            </template>
+            <p class="muted" x-show="!modal.request_curl">Request not captured for this endpoint.</p>
+
+            <h3>Responses</h3>
+            <div class="cols3">
+              <template x-for="u in ['baseline','candidate','control']" :key="u">
+                <div class="col">
+                  <h4 x-text="u"></h4>
+                  <div class="st muted">status:
+                    <span x-text="('status' in modal[u]) ? modal[u].status : 'no response'"></span>
+                  </div>
+                  <pre class="body" x-show="'body' in modal[u]" x-text="bodyText(modal[u].body)" x-cloak></pre>
+                  <p class="muted" x-show="!('body' in modal[u])">no body stored</p>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
   </div>
 
   <script>
     document.addEventListener('alpine:init', () => {
       Alpine.data('diffs', () => ({
         endpoints: [],
+        failingOnly: false,
         selected: null,
         path: null,
         detail: null,
+        pathSort: 'field',
+        excludeSel: {},
+        preview: null,
         limit: 20,
         offset: 0,
         error: '',
@@ -199,6 +302,7 @@
         openCurl: null,
         suppressText: '',
         suppressSaved: false,
+        modal: null,
 
         async init() { await this.loadEndpoints(); await this.loadUpstreams(); },
 
@@ -224,9 +328,62 @@
           } catch (e) { this.error = String(e); }
         },
 
+        // Failing endpoints first (most regressions), then alphabetical.
+        visibleEndpoints() {
+          return this.endpoints
+            .filter(e => !this.failingOnly || e.regressions > 0)
+            .slice()
+            .sort((a, b) => (b.regressions - a.regressions) || a.endpoint.localeCompare(b.endpoint));
+        },
+
+        sortedPaths() {
+          const paths = this.selected ? this.selected.paths.slice() : [];
+          if (this.pathSort === 'noise') {
+            paths.sort((a, b) => (b.noise_count - a.noise_count) || (b.raw_count - a.raw_count)
+              || a.path.localeCompare(b.path));
+          } else {
+            paths.sort((a, b) => a.path.localeCompare(b.path));
+          }
+          return paths;
+        },
+
         select(ep) {
           this.selected = ep; this.path = null; this.detail = null; this.offset = 0;
+          this.excludeSel = {}; this.preview = null;
           this.loadSuppress(ep.endpoint);
+        },
+
+        toggleExclude(path) {
+          if (this.excludeSel[path]) delete this.excludeSel[path];
+          else this.excludeSel[path] = true;
+          this.preview = null;
+        },
+        selectedExcludes() { return Object.keys(this.excludeSel); },
+        clearExcluded() { this.excludeSel = {}; this.preview = null; },
+
+        // Live preview: recompute this endpoint as if the selected prefixes were
+        // suppressed, WITHOUT persisting.
+        async previewExclude() {
+          if (!this.selected) return;
+          this.error = '';
+          try {
+            const u = new URL('/diffs/paths', location.origin);
+            u.searchParams.set('endpoint', this.selected.endpoint);
+            u.searchParams.set('exclude', this.selectedExcludes().join(','));
+            const r = await fetch(u);
+            if (!r.ok) throw new Error('GET /diffs/paths (preview) → ' + r.status);
+            this.preview = await r.json();
+          } catch (e) { this.error = String(e); }
+        },
+
+        // Persist the selected prefixes by appending them to the suppress rules.
+        async saveExcluded() {
+          if (!this.selected) return;
+          const merged = Array.from(new Set([...this.parsePaths(), ...this.selectedExcludes()]));
+          await this.putSuppress(merged);
+          this.suppressText = merged.join('\n');
+          this.excludeSel = {}; this.preview = null;
+          await this.refreshAfterSuppress();
         },
 
         async loadSuppress(endpoint) {
@@ -244,8 +401,22 @@
           return this.suppressText.split('\n').map(s => s.trim()).filter(Boolean);
         },
 
-        // Rules apply at read time, so refresh endpoints + the open detail to show
-        // the effect immediately.
+        async putSuppress(paths) {
+          const u = new URL('/suppress', location.origin);
+          u.searchParams.set('endpoint', this.selected.endpoint);
+          const r = await fetch(u, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ paths }),
+          });
+          if (!r.ok) {
+            let msg = 'PUT /suppress → ' + r.status;
+            try { msg = (await r.json()).error || msg; } catch (e) {}
+            throw new Error(msg);
+          }
+        },
+
+        // Rules apply at read time, so refresh endpoints + the open detail.
         async refreshAfterSuppress() {
           await this.loadEndpoints();
           if (this.selected && this.path) await this.loadDetail();
@@ -255,14 +426,7 @@
           if (!this.selected) return;
           this.error = ''; this.suppressSaved = false;
           try {
-            const u = new URL('/suppress', location.origin);
-            u.searchParams.set('endpoint', this.selected.endpoint);
-            const r = await fetch(u, {
-              method: 'PUT',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ paths: this.parsePaths() }),
-            });
-            if (!r.ok) throw new Error('PUT /suppress → ' + r.status);
+            await this.putSuppress(this.parsePaths());
             this.suppressSaved = true;
             await this.refreshAfterSuppress();
           } catch (e) { this.error = String(e); }
@@ -334,13 +498,25 @@
           } catch (e) { this.error = String(e); }
         },
 
+        // --- inspect modal ---
+        async inspect(s) {
+          if (!this.selected) return;
+          this.error = '';
+          try {
+            const u = new URL('/diffs/sample', location.origin);
+            u.searchParams.set('endpoint', this.selected.endpoint);
+            u.searchParams.set('id', s.id);
+            const r = await fetch(u);
+            if (!r.ok) throw new Error('GET /diffs/sample → ' + r.status);
+            this.modal = await r.json();
+          } catch (e) { this.error = String(e); }
+        },
+        closeModal() { this.modal = null; },
+        bodyText(v) { return v === undefined ? '' : JSON.stringify(v, null, 2); },
+
         // A field's diff_type as a human label, e.g. "missing_field" → "missing field".
         dlabel(d) { return (d.diff_type || '').replace(/_/g, ' '); },
 
-        // Render the value change by presence: both sides → "a → b"; only one
-        // side present (missing/extra field) → that value; neither (ordering)
-        // → empty, the badge carries the meaning. A present side that is JSON
-        // null renders as "null" (distinct from an absent side).
         diffValue(d) {
           const hasL = Object.prototype.hasOwnProperty.call(d, 'left');
           const hasR = Object.prototype.hasOwnProperty.call(d, 'right');
@@ -350,24 +526,21 @@
           return '';
         },
 
-        // JSON.stringify keeps types visible: strings quoted, null as "null",
-        // objects/arrays as compact JSON.
         fmt(v) { return JSON.stringify(v); },
 
-        // The stored curl with its $RIFFY_TARGET placeholder replaced by the
+        // A stored curl with its $RIFFY_TARGET placeholder replaced by the
         // selected upstream base (or left as the placeholder if unknown).
-        curlFor(s) {
+        curlFor(curl) {
           const base = this.upstreams[this.target] || '$RIFFY_TARGET';
-          return (s.request_curl || '').split('$RIFFY_TARGET').join(base);
+          return (curl || '').split('$RIFFY_TARGET').join(base);
         },
 
-        async copyCurl(s) {
-          const text = this.curlFor(s);
+        copyCurl(s) { return this.copyText(this.curlFor(s.request_curl)); },
+
+        async copyText(text) {
           try {
             await navigator.clipboard.writeText(text);
           } catch (e) {
-            // No clipboard (insecure context): reveal the command for manual copy.
-            this.openCurl = this.detail.samples.items.indexOf(s);
             this.error = 'clipboard unavailable — copy the command manually';
           }
         },

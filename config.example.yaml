@@ -29,13 +29,18 @@ upstream:
 #   only) but not analyzed.
 #
 # suppress_paths: dot-separated JSON paths to exclude from diff analysis.
-#   Two match modes:
+#   Three match modes:
 #   - Plain path (no *): suppresses the path and all its descendants.
 #       "meta"       → suppresses meta, meta.ts, meta.nested.v, …
 #   - Glob path (contains *): * matches exactly one dot-separated segment;
 #     path depth must equal the pattern depth.
 #       "meta.*"     → suppresses meta.ts, meta.v  (direct children only)
 #       "items.*.id" → suppresses items.0.id, items.1.id, … (not items.0.name)
+#   - Regex ("re:" prefix): the regex is matched against each dot-path; a field
+#     is ignored if the regex matches it OR any of its ancestors (so children of
+#     a matched field are ignored too).
+#       "re:.*_at$"      → ignores created_at, user.updated_at, … and their children
+#       "re:^items\.\d+" → ignores every indexed items element
 #
 # sample_rate: fraction of requests to analyze (0.0–1.0, default 1.0).
 #   Sampled-out requests are still proxied (baseline only); candidate/control
@@ -59,6 +64,7 @@ endpoints:
       - "updated_at"     # plain: suppresses updated_at and any descendants
       - "meta.*"         # glob:  suppresses all direct children of meta
       - "items.*.ts"     # glob:  suppresses the ts field in each items element
+      - "re:.*_at$"      # regex: ignore any field ending in _at, and its children
     sample_rate: 0.5     # analyze 50% of requests
     capture_request_curl: true       # store a replayable curl per diff
     store_credentials_header: false  # redact auth/cookie values (default)

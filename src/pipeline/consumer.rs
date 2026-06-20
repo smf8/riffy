@@ -73,6 +73,8 @@ impl Consumer {
             upstream_body(&msg.control_response, baseline_status, self.max_body_bytes).await;
 
         let sample = RawSample {
+            // The store assigns the id on write.
+            id: String::new(),
             endpoint: endpoint.clone(),
             timestamp: Utc::now(),
             baseline_status,

@@ -146,6 +146,20 @@ fn sampling_rate_boundary_values_are_valid() {
 }
 
 #[test]
+fn invalid_suppress_regex_fails() {
+    let mut cfg = valid_config();
+    cfg.endpoints[0].suppress_paths = vec!["re:(".to_owned()];
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn valid_suppress_regex_passes() {
+    let mut cfg = valid_config();
+    cfg.endpoints[0].suppress_paths = vec!["re:.*_at$".to_owned(), "meta.*".to_owned()];
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
 fn endpoint_sample_rate_above_one_fails() {
     let mut cfg = valid_config();
     cfg.endpoints[0].sample_rate = 1.1;

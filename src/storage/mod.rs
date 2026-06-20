@@ -23,6 +23,10 @@ pub const SAMPLE_KEY_PREFIX: &str = "riffy:samples";
 /// the consumer); a non-JSON body is stored as `None`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawSample {
+    /// Stable handle assigned by the store on write (Redis stream id / in-memory
+    /// sequence); empty when the producer constructs the sample. Used to fetch the
+    /// full sample for the inspect view.
+    pub id: String,
     pub endpoint: String,
     pub timestamp: DateTime<Utc>,
     pub baseline_status: u16,
@@ -47,6 +51,9 @@ pub trait SampleStore: Send + Sync {
     /// All samples recorded for one endpoint within the retention window,
     /// newest-first. Never called on the proxy hot path.
     async fn fetch_samples(&self, endpoint: &str) -> Result<Vec<RawSample>, StoreError>;
+
+    /// One stored sample by its id (for the inspect view). `None` if absent.
+    async fn get_sample(&self, endpoint: &str, id: &str) -> Result<Option<RawSample>, StoreError>;
 
     /// Every endpoint that currently has stored samples.
     async fn list_endpoints(&self) -> Result<Vec<String>, StoreError>;

@@ -102,6 +102,19 @@ impl SampleStore for RedisSampleStore {
         Ok(out)
     }
 
+    async fn get_sample(&self, endpoint: &str, id: &str) -> Result<Option<RawSample>, StoreError> {
+        let mut conn = self.conn.clone();
+        // XRANGE key id id returns the single entry with that exact stream id.
+        let reply: StreamRangeReply = conn
+            .xrange(stream_key(endpoint), id, id)
+            .await
+            .map_err(StoreError::Redis)?;
+        match reply.ids.first() {
+            Some(entry) => Ok(Some(sample_from_entry(entry, endpoint)?)),
+            None => Ok(None),
+        }
+    }
+
     async fn list_endpoints(&self) -> Result<Vec<String>, StoreError> {
         let mut conn = self.conn.clone();
         conn.smembers(ENDPOINTS_INDEX)
@@ -145,6 +158,7 @@ fn sample_from_entry(entry: &StreamId, endpoint: &str) -> Result<RawSample, Stor
         .ok_or_else(|| StoreError::Corrupt(format!("sample {} missing baseline_body", entry.id)))?;
 
     Ok(RawSample {
+        id: entry.id.clone(),
         endpoint: endpoint.to_owned(),
         timestamp,
         baseline_status,

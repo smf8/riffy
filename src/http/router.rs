@@ -72,6 +72,7 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/metrics", get(render_metrics))
         .route("/diffs/paths", get(query::list_paths))
         .route("/diffs/detail", get(query::diff_detail))
+        .route("/diffs/sample", get(query::get_sample))
         .route("/diffs", delete(query::reset_stats))
         .route(
             "/suppress",

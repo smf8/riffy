@@ -112,8 +112,10 @@ pub struct EndpointConfig {
     #[garde(dive)]
     #[serde(default)]
     pub threshold: Threshold,
-    /// Dot-separated JSON paths excluded from diff analysis.
-    /// Subtree suppression: `"a.b"` also suppresses `"a.b.c"`, `"a.b.d.e"`, etc.
+    /// JSON paths excluded from diff analysis. Three match modes (see
+    /// `analysis::suppress`): plain subtree (`"a.b"` also hides `"a.b.c"`),
+    /// `*` glob (one segment), and `re:<regex>` (matches the field or any of its
+    /// children).
     #[garde(skip)]
     #[serde(default)]
     pub suppress_paths: Vec<String>,
@@ -277,6 +279,14 @@ impl Riffy {
             self.server.proxy_port != self.server.admin_port,
             "server.proxy-port and server.admin-port must differ"
         );
+
+        // Compiling the suppression rules validates any `re:` regex patterns.
+        for endpoint in &self.endpoints {
+            crate::analysis::suppress::SuppressRules::compile(&endpoint.suppress_paths)
+                .with_context(|| {
+                    format!("invalid suppress_paths for endpoint '{}'", endpoint.pattern)
+                })?;
+        }
 
         Ok(())
     }

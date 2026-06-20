@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use super::error::StoreError;
@@ -13,6 +14,8 @@ pub struct InMemorySampleStore {
     /// Max retained samples per endpoint; oldest is dropped when exceeded.
     cap: usize,
     window_secs: u64,
+    /// Monotonic source for sample ids (mirrors Redis assigning a stream id).
+    next_id: AtomicU64,
 }
 
 impl Default for InMemorySampleStore {
@@ -35,6 +38,7 @@ impl InMemorySampleStore {
             endpoints: Mutex::new(HashMap::new()),
             cap: cap.max(1),
             window_secs: window.as_secs().max(1),
+            next_id: AtomicU64::new(0),
         }
     }
 
@@ -47,9 +51,13 @@ impl InMemorySampleStore {
 #[async_trait::async_trait]
 impl SampleStore for InMemorySampleStore {
     async fn append_sample(&self, sample: &RawSample) -> Result<(), StoreError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut stored = sample.clone();
+        stored.id = id.to_string();
+
         let mut endpoints = self.endpoints.lock().await;
         let samples = endpoints.entry(sample.endpoint.clone()).or_default();
-        samples.push_back(sample.clone());
+        samples.push_back(stored);
         while samples.len() > self.cap {
             samples.pop_front();
         }
@@ -68,6 +76,13 @@ impl SampleStore for InMemorySampleStore {
             .filter(|s| self.within_window(s, now))
             .cloned()
             .collect())
+    }
+
+    async fn get_sample(&self, endpoint: &str, id: &str) -> Result<Option<RawSample>, StoreError> {
+        let endpoints = self.endpoints.lock().await;
+        Ok(endpoints
+            .get(endpoint)
+            .and_then(|samples| samples.iter().find(|s| s.id == id).cloned()))
     }
 
     async fn list_endpoints(&self) -> Result<Vec<String>, StoreError> {

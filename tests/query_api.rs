@@ -22,6 +22,7 @@ fn raw(
     control: Option<&str>,
 ) -> RawSample {
     RawSample {
+        id: String::new(),
         endpoint: endpoint.to_owned(),
         timestamp: Utc::now(),
         baseline_status: 200,
@@ -38,7 +39,7 @@ async fn spawn_admin(store: Arc<InMemorySampleStore>) -> (SocketAddr, Arc<DiffEn
     spawn_admin_with_engine(
         store,
         Arc::new(DiffEngine::new(
-            SuppressRules::from_config(&[]),
+            SuppressRules::from_config(&[]).unwrap(),
             EndpointClassifiers::from_config(&[]),
         )),
     )
@@ -122,10 +123,15 @@ async fn list_paths_lists_all_endpoints_and_filters_by_endpoint() {
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["total"], 3);
+    assert_eq!(body["regressions"], 2);
     let paths = body["paths"].as_array().unwrap();
     assert_eq!(paths.len(), 2);
-    assert_eq!(paths[0], "user.email");
-    assert_eq!(paths[1], "user.name");
+    // paths are PathSummary objects, sorted by path, carrying counts + verdict.
+    assert_eq!(paths[0]["path"], "user.email");
+    assert_eq!(paths[0]["raw_count"], 3);
+    assert_eq!(paths[0]["noise_count"], 0);
+    assert_eq!(paths[0]["is_regression"], true);
+    assert_eq!(paths[1]["path"], "user.name");
 
     let resp = client
         .get(format!("http://{addr}/diffs/paths"))
@@ -288,7 +294,7 @@ async fn suppress_rules_apply_at_read_time() {
         .unwrap();
     let paths = body["paths"].as_array().unwrap();
     assert_eq!(paths.len(), 1);
-    assert_eq!(paths[0], "b");
+    assert_eq!(paths[0]["path"], "b");
 
     // GET reflects the stored rule.
     let body: Value = client
@@ -320,6 +326,166 @@ async fn suppress_rules_apply_at_read_time() {
         .await
         .unwrap();
     assert_eq!(body["paths"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn exclude_param_previews_without_persisting() {
+    let store = Arc::new(InMemorySampleStore::new());
+    store
+        .append_sample(&raw(
+            "/api/v1/users/:id",
+            r#"{"a":1,"b":1}"#,
+            Some(r#"{"a":2,"b":2}"#),
+            Some(r#"{"a":1,"b":1}"#),
+        ))
+        .await
+        .unwrap();
+
+    let (addr, _) = spawn_admin(store).await;
+    let client = http_client();
+
+    // Preview with "a" excluded: only "b" shows, but nothing is persisted.
+    let body: Value = client
+        .get(format!("http://{addr}/diffs/paths"))
+        .query(&[("endpoint", "/api/v1/users/:id"), ("exclude", "a")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let paths = body["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0]["path"], "b");
+
+    // Without the param the stored rules are unchanged — both fields are back.
+    let body: Value = client
+        .get(format!("http://{addr}/diffs/paths"))
+        .query(&[("endpoint", "/api/v1/users/:id")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["paths"].as_array().unwrap().len(), 2);
+
+    // GET /suppress confirms nothing was persisted.
+    let body: Value = client
+        .get(format!("http://{addr}/suppress"))
+        .query(&[("endpoint", "/api/v1/users/:id")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(body["paths"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn regex_suppress_rule_ignores_field_and_invalid_is_rejected() {
+    let store = Arc::new(InMemorySampleStore::new());
+    store
+        .append_sample(&raw(
+            "/api/v1/users/:id",
+            r#"{"created_at":1,"name":"a"}"#,
+            Some(r#"{"created_at":2,"name":"b"}"#),
+            Some(r#"{"created_at":1,"name":"a"}"#),
+        ))
+        .await
+        .unwrap();
+
+    let (addr, _) = spawn_admin(store).await;
+    let client = http_client();
+
+    // A regex rule ignores created_at; only name remains.
+    let resp = client
+        .put(format!("http://{addr}/suppress"))
+        .query(&[("endpoint", "/api/v1/users/:id")])
+        .json(&serde_json::json!({ "paths": ["re:.*_at$"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = client
+        .get(format!("http://{addr}/diffs/paths"))
+        .query(&[("endpoint", "/api/v1/users/:id")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let paths = body["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0]["path"], "name");
+
+    // An invalid regex is rejected with 400.
+    let resp = client
+        .put(format!("http://{addr}/suppress"))
+        .query(&[("endpoint", "/api/v1/users/:id")])
+        .json(&serde_json::json!({ "paths": ["re:("] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn get_sample_returns_full_request_and_responses() {
+    let store = Arc::new(InMemorySampleStore::new());
+    let mut s = raw(
+        "/api/v1/users/:id",
+        r#"{"a":1}"#,
+        Some(r#"{"a":2}"#),
+        Some(r#"{"a":1}"#),
+    );
+    s.request_curl = Some("curl -X GET '$RIFFY_TARGET/api/v1/users/7'".to_owned());
+    store.append_sample(&s).await.unwrap();
+
+    let (addr, _) = spawn_admin(store).await;
+    let client = http_client();
+
+    // Learn the sample id from the detail page.
+    let detail: Value = client
+        .get(format!("http://{addr}/diffs/detail"))
+        .query(&[("endpoint", "/api/v1/users/:id"), ("path", "a")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = detail["samples"]["items"][0]["id"].as_str().unwrap();
+
+    let body: Value = client
+        .get(format!("http://{addr}/diffs/sample"))
+        .query(&[("endpoint", "/api/v1/users/:id"), ("id", id)])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["baseline"]["status"], 200);
+    assert_eq!(body["baseline"]["body"]["a"], 1);
+    assert_eq!(body["candidate"]["body"]["a"], 2);
+    assert_eq!(body["control"]["body"]["a"], 1);
+    assert!(body["request_curl"]
+        .as_str()
+        .unwrap()
+        .contains("$RIFFY_TARGET"));
+
+    // Unknown id → 404.
+    let resp = client
+        .get(format!("http://{addr}/diffs/sample"))
+        .query(&[("endpoint", "/api/v1/users/:id"), ("id", "nope")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
 }
 
 #[tokio::test]

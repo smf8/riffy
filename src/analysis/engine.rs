@@ -32,6 +32,8 @@ pub struct EndpointCounts {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiffSample {
+    /// Store id, so the UI can fetch the full request/response via `/diffs/sample`.
+    pub id: String,
     pub timestamp: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<FieldDiff>,
@@ -76,23 +78,72 @@ impl DiffEngine {
         self.suppress.load_full()
     }
 
-    /// Replace one endpoint's suppression rules (empty list clears it). Takes
-    /// effect on the next query; `rcu` makes concurrent edits safe.
-    pub fn set_suppress(&self, endpoint: &str, paths: Vec<String>) {
-        self.suppress
-            .rcu(|cur| Arc::new(cur.with_endpoint(endpoint, paths.clone())));
+    /// Replace one endpoint's suppression rules (empty list clears it). Rejects an
+    /// invalid `re:` regex. Takes effect on the next query; `rcu` makes concurrent
+    /// edits safe.
+    pub fn set_suppress(&self, endpoint: &str, paths: Vec<String>) -> Result<(), regex::Error> {
+        // Validate up front so a bad regex is rejected before any swap.
+        SuppressRules::compile(&paths)?;
+        self.suppress.rcu(|cur| {
+            // Patterns were validated just above, so this recompile cannot fail.
+            Arc::new(
+                cur.with_endpoint(endpoint, paths.clone())
+                    .expect("suppress patterns validated above"),
+            )
+        });
+        Ok(())
     }
 
-    /// Sum per-field raw/noise diff counts across the windowed samples.
-    /// `None` when there are no samples for the endpoint.
-    pub fn aggregate(&self, endpoint: &str, samples: &[RawSample]) -> Option<EndpointCounts> {
+    /// Whether a field path is a regression for this endpoint (classifier verdict,
+    /// with the `:status` raw>noise special case).
+    pub fn is_regression(
+        &self,
+        endpoint: &str,
+        path: &str,
+        counts: &FieldCounts,
+        total: u64,
+    ) -> bool {
+        if path == STATUS_FIELD {
+            // A status divergence is categorically a regression when the candidate
+            // diverges more than the control — independent of percentage thresholds,
+            // which would dilute a rare but critical status difference.
+            counts.raw_count > counts.noise_count
+        } else {
+            self.classifiers
+                .for_endpoint(endpoint)
+                .is_regression(counts, total)
+        }
+    }
+
+    /// The regressing field paths for an aggregated endpoint, sorted. Powers the
+    /// failing-endpoints overview and the per-field regression marks.
+    pub fn regressions(&self, counts: &EndpointCounts) -> Vec<String> {
+        let mut out: Vec<String> = counts
+            .fields
+            .iter()
+            .filter(|(path, field)| self.is_regression(&counts.endpoint, path, field, counts.total))
+            .map(|(path, _)| path.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Sum per-field raw/noise diff counts across the windowed samples, applying
+    /// `extra` exclusions on top of the stored rules (used for the non-persisted
+    /// preview). `None` when there are no samples for the endpoint.
+    pub fn aggregate(
+        &self,
+        endpoint: &str,
+        samples: &[RawSample],
+        extra: &SuppressRules,
+    ) -> Option<EndpointCounts> {
         if samples.is_empty() {
             return None;
         }
         let rules = self.suppress.load_full();
         let mut fields: HashMap<String, FieldCounts> = HashMap::new();
         for sample in samples {
-            let (raw, noise) = diff_sample(endpoint, sample, &rules);
+            let (raw, noise) = diff_sample(endpoint, sample, &rules, extra);
             for path in raw.keys() {
                 fields.entry(path.clone()).or_default().raw_count += 1;
             }
@@ -116,12 +167,14 @@ impl DiffEngine {
     }
 
     /// Counts and a paginated, newest-first list of per-sample diffs for one
-    /// field path. `samples` must be newest-first.
+    /// field path. `samples` must be newest-first. `extra` applies non-persisted
+    /// exclusions on top of the stored rules.
     pub fn detail(
         &self,
         endpoint: &str,
         path: &str,
         samples: &[RawSample],
+        extra: &SuppressRules,
         limit: usize,
         offset: usize,
     ) -> DiffDetail {
@@ -136,7 +189,7 @@ impl DiffEngine {
         let mut matches: Vec<DiffSample> = Vec::new();
 
         for sample in samples {
-            let (raw, noise) = diff_sample(endpoint, sample, &rules);
+            let (raw, noise) = diff_sample(endpoint, sample, &rules, extra);
             let raw_at = raw.get(path).cloned();
             let noise_at = noise.get(path).cloned();
             if raw_at.is_some() {
@@ -147,6 +200,7 @@ impl DiffEngine {
             }
             if (raw_at.is_some() || noise_at.is_some()) && matches.len() < want {
                 matches.push(DiffSample {
+                    id: sample.id.clone(),
                     timestamp: sample.timestamp,
                     raw: raw_at,
                     noise: noise_at,
@@ -158,16 +212,7 @@ impl DiffEngine {
         let has_more = matches.len() > offset.saturating_add(limit);
         let items = matches.into_iter().skip(offset).take(limit).collect();
 
-        let is_regression = if path == STATUS_FIELD {
-            // A status divergence is categorically a regression when the candidate
-            // diverges more than the control — independent of percentage thresholds,
-            // which would dilute a rare but critical status difference.
-            counts.raw_count > counts.noise_count
-        } else {
-            self.classifiers
-                .for_endpoint(endpoint)
-                .is_regression(&counts, total)
-        };
+        let is_regression = self.is_regression(endpoint, path, &counts, total);
 
         DiffDetail {
             endpoint: endpoint.to_owned(),
@@ -196,6 +241,7 @@ fn diff_sample(
     endpoint: &str,
     sample: &RawSample,
     rules: &SuppressRules,
+    extra: &SuppressRules,
 ) -> (HashMap<String, FieldDiff>, HashMap<String, FieldDiff>) {
     let baseline: Value = match serde_json::from_str(&sample.baseline_body) {
         Ok(v) => v,
@@ -211,6 +257,7 @@ fn diff_sample(
         sample.candidate_status,
         sample.candidate_body.as_deref(),
         rules,
+        extra,
     );
     let noise = diff_one(
         endpoint,
@@ -219,10 +266,12 @@ fn diff_sample(
         sample.control_status,
         sample.control_body.as_deref(),
         rules,
+        extra,
     );
     (raw, noise)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn diff_one(
     endpoint: &str,
     baseline: &Value,
@@ -230,6 +279,7 @@ fn diff_one(
     other_status: Option<u16>,
     other_body: Option<&str>,
     rules: &SuppressRules,
+    extra: &SuppressRules,
 ) -> HashMap<String, FieldDiff> {
     let mut diffs = match other_status {
         // Upstream failed: contributes nothing.
@@ -257,7 +307,10 @@ fn diff_one(
         }
     };
 
-    // Apply suppression directly while computing the diff.
-    diffs.retain(|path, _| !rules.is_suppressed(endpoint, path));
+    // Apply suppression directly while computing the diff: stored rules plus the
+    // ad-hoc preview exclusions.
+    diffs.retain(|path, _| {
+        !rules.is_suppressed(endpoint, path) && !extra.is_suppressed(endpoint, path)
+    });
     diffs
 }

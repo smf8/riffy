@@ -5,6 +5,8 @@ use chrono::{DateTime, Utc};
 
 fn sample_at(endpoint: &str, tag: &str, timestamp: DateTime<Utc>) -> RawSample {
     RawSample {
+        // The store assigns the real id on write.
+        id: String::new(),
         endpoint: endpoint.to_owned(),
         timestamp,
         baseline_status: 200,
@@ -67,6 +69,29 @@ async fn cap_trims_oldest_per_endpoint() {
     // Newest-first: s2 then s1; s0 was trimmed.
     assert_eq!(got[0].baseline_body, r#"{"v":"s2"}"#);
     assert_eq!(got[1].baseline_body, r#"{"v":"s1"}"#);
+}
+
+#[tokio::test]
+async fn get_sample_by_id_hit_and_miss() {
+    let store = InMemorySampleStore::new();
+    store.append_sample(&sample("/e", "x")).await.unwrap();
+    store.append_sample(&sample("/e", "y")).await.unwrap();
+
+    // The store assigns ids on write; fetch to learn one.
+    let fetched = store.fetch_samples("/e").await.unwrap();
+    let id = &fetched[0].id;
+    assert!(!id.is_empty());
+
+    let got = store.get_sample("/e", id).await.unwrap().expect("hit");
+    assert_eq!(&got.id, id);
+    assert_eq!(got.baseline_body, fetched[0].baseline_body);
+
+    assert!(store
+        .get_sample("/e", "does-not-exist")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(store.get_sample("/other", id).await.unwrap().is_none());
 }
 
 #[tokio::test]

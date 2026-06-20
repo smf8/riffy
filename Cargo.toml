@@ -47,6 +47,8 @@ dashmap = "6"
 rand = "0.9"
 # Lock-free atomic swap for runtime-writable suppression rules (read side only).
 arc-swap = "1"
+# Regex match mode for suppression rules ("re:" patterns); read side only.
+regex = "1"
 
 # Error handling
 anyhow = "1"

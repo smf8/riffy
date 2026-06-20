@@ -13,6 +13,9 @@ pub enum AppError {
 
     #[error("{0}")]
     NotFound(String),
+
+    #[error("{0}")]
+    BadRequest(String),
 }
 
 impl IntoResponse for AppError {
@@ -31,6 +34,7 @@ impl IntoResponse for AppError {
                 )
             }
             AppError::NotFound(message) => (StatusCode::NOT_FOUND, message.clone()),
+            AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message.clone()),
         };
 
         (status, Json(json!({ "error": message }))).into_response()

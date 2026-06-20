@@ -87,31 +87,36 @@ suppression rules inline (R42), aggregates counts, and classifies — nothing is
 precomputed, so a result is always derived from the current samples and the
 current rules/thresholds. A minimal Alpine.js dashboard is served at `GET /`
 (HTML + vendored Alpine embedded via `include_str!`, no build step) and drives
-that same read API, including a panel that edits suppression rules live (R34).
+that same read API as an operator workflow — triage failing endpoints → drill
+endpoint→field→request → inspect the raw request/response in a modal → tame
+noise (ignore-rule editor, regex-capable) → re-check stats with noise excluded
+(R34/R44/R45).
 
 ```mermaid
 flowchart LR
     operator(["Operator / Prometheus"]) --> admin
 
     subgraph admin ["Admin server — axum on server.admin-port, admin_router (src/http/router.rs, R24/R29/R33)"]
-        ui["GET / + /alpine.js<br/>embedded Alpine.js dashboard, no build step;<br/>diff views + live suppression-rule editor (R34/R42)<br/>(src/http/ui.rs, ui/index.html)"]
+        ui["GET / + /alpine.js<br/>embedded Alpine.js dashboard, no build step;<br/>overview→drill→inspect modal→ignore editor→re-check (R34/R44/R45)<br/>(src/http/ui.rs, ui/index.html)"]
         hz["GET /healthz → 204"]
         mx["GET /metrics → PrometheusHandle.render<br/>empty body when metrics.enabled=false<br/>(src/http/metrics.rs, R39)"]
-        paths["GET /diffs/paths[?endpoint=]<br/>endpoints → diffing field paths<br/>(src/http/query.rs)"]
-        detail["GET /diffs/detail?endpoint=&path=<br/>counts + verdict + paginated samples,<br/>all diffed at read time (R41)<br/>(src/http/query.rs)"]
+        paths["GET /diffs/paths[?endpoint=][&exclude=a,b]<br/>per endpoint: total, regressions count, and PathSummary[]<br/>{path, raw_count, noise_count, is_regression};<br/>exclude = ad-hoc non-persisted preview (R44)<br/>(src/http/query.rs)"]
+        detail["GET /diffs/detail?endpoint=&path=[&exclude=a,b]<br/>counts + verdict + paginated samples (carry sample id),<br/>all diffed at read time (R41/R44)<br/>(src/http/query.rs)"]
+        sample["GET /diffs/sample?endpoint=&id=<br/>one sample's request curl + baseline/candidate/control<br/>status+body for the inspect modal (R45)<br/>(src/http/query.rs)"]
         reset["DELETE /diffs?endpoint=<br/>drop an endpoint's stored samples (R43)<br/>(src/http/query.rs)"]
-        suppress["GET/PUT/DELETE /suppress?endpoint=<br/>read/replace/clear an endpoint's suppression rules;<br/>swaps DiffEngine.ArcSwap, live (R42)<br/>(src/http/query.rs)"]
+        suppress["GET/PUT/DELETE /suppress?endpoint=<br/>read/replace/clear ignore rules (subtree / * glob / re:regex);<br/>swaps DiffEngine.ArcSwap live; PUT 400 on bad regex (R42/R44)<br/>(src/http/query.rs)"]
         ups["GET /upstreams<br/>scheme-normalized baseline/candidate/control bases;<br/>UI substitutes them for $RIFFY_TARGET in a captured curl (R38)<br/>(src/http/query.rs)"]
     end
 
-    paths -. "list_endpoints + fetch_samples + engine.aggregate" .-> engine
-    detail -. "fetch_samples + engine.detail" .-> engine
+    paths -. "list_endpoints + fetch_samples + engine.aggregate(+extra) + engine.regressions" .-> engine
+    detail -. "fetch_samples + engine.detail(+extra)" .-> engine
+    sample -. "get_sample" .-> readstore
     reset -. "delete_endpoint" .-> readstore
     suppress -. "engine.rules / set_suppress" .-> engine
 
-    engine[["DiffEngine (src/analysis/engine.rs, R41/R42)<br/>diff_sample (inline suppression) → aggregate → classify<br/>ArcSwap&lt;SuppressRules&gt; + EndpointClassifiers"]]
+    engine[["DiffEngine (src/analysis/engine.rs, R41/R42)<br/>diff_sample (inline suppression + ad-hoc extra) → aggregate → classify<br/>ArcSwap&lt;SuppressRules&gt; + EndpointClassifiers"]]
     engine -. "fetch_samples / list_endpoints" .-> readstore
-    readstore[("SampleStore read side (R43)<br/>XREVRANGE / SMEMBERS, window-filtered")]
+    readstore[("SampleStore read side (R43/R45)<br/>XREVRANGE / SMEMBERS / XRANGE id id, window-filtered")]
 ```
 
 For each sample the engine reproduces the status-before-body rule (R23): a
@@ -121,21 +126,34 @@ upstream is diffed via `flatten_value` (`src/compare/`) into dot-paths
 (raw = baseline vs candidate, noise = baseline vs control); a failed upstream
 (status `None`) contributes nothing. Suppression is applied **while** computing
 each diff — `diffs.retain(|path| !rules.is_suppressed(endpoint, path))` — so a
-suppressed path is never counted or shown (R42). Counts are then summed across
-the windowed samples and the verdict is computed per endpoint via
-`EndpointClassifiers` (held inside the engine), falling back to the diffy
-defaults for unmatched endpoints (R33); changing a threshold reclassifies
-everything on the next read with no re-flush. The reserved `:status` field
-bypasses the percentage thresholds — it is flagged whenever raw > noise (R36).
+suppressed path is never counted or shown (R42). An ignore rule matches in one of
+three modes (R44): plain subtree (`meta` → `meta` and descendants), `*` glob
+(one segment), or `re:<regex>` (matches the field path or any ancestor prefix, so
+children of a matched field are ignored too). Patterns are compiled with the
+`regex` crate, so `SuppressRules::{from_config,with_endpoint}` return `Result`,
+config validation compiles them at startup, and `PUT /suppress` answers `400`
+(`AppError::BadRequest`) on an invalid regex. The query handlers can layer an
+**ad-hoc, non-persisted** rule set on top of the stored one — the `exclude` param
+builds a temporary `SuppressRules::for_endpoint` passed to
+`aggregate`/`detail` as `extra` — which is the dashboard's "re-check with noise
+excluded" live preview before the operator saves the prefixes onto `/suppress`
+(R44). Counts are then summed across the windowed samples and the verdict is
+computed per endpoint via `EndpointClassifiers` (held inside the engine), falling
+back to the diffy defaults for unmatched endpoints (R33); changing a threshold
+reclassifies everything on the next read with no re-flush. The reserved `:status`
+field bypasses the percentage thresholds — it is flagged whenever raw > noise
+(R36). `engine.regressions` rolls the per-field verdicts up to the
+failing-endpoints overview count.
 
 | Query route | Response |
 |-------------|----------|
-| `GET /diffs/paths` | `{ "endpoints": [ { endpoint, total, paths[], last_updated } ] }`, sorted by endpoint; each is one endpoint's samples aggregated at read time |
-| `GET /diffs/paths?endpoint=<ep>` | one `{ endpoint, total, paths[], last_updated }`; 404 if the endpoint has no samples |
-| `GET /diffs/detail?endpoint=&path=` | `{ endpoint, path, total, raw_count, noise_count, is_regression, relative_difference, absolute_difference, last_updated, samples }` — all derived from the raw samples at read time; `samples = { items[], limit, offset, has_more }`, newest-first; 404 if the endpoint has no samples, or if the path never diffs at offset 0. `limit` default 20 / max 100 |
+| `GET /diffs/paths` | `{ "endpoints": [ { endpoint, total, regressions, paths[], last_updated } ] }`, sorted by endpoint; `regressions` = count of regressing field paths; `paths[]` are `PathSummary { path, raw_count, noise_count, is_regression }` (R44) |
+| `GET /diffs/paths?endpoint=<ep>[&exclude=a,b]` | one `{ endpoint, total, regressions, paths[], last_updated }`; `exclude` previews the result with those extra prefixes ignored (not persisted, R44); 404 if the endpoint has no samples |
+| `GET /diffs/detail?endpoint=&path=[&exclude=a,b]` | `{ endpoint, path, total, raw_count, noise_count, is_regression, relative_difference, absolute_difference, last_updated, samples }` — all derived from the raw samples at read time; `samples = { items[], limit, offset, has_more }`, newest-first, each item carrying its store `id`; `exclude` previews extra exclusions (R44); 404 if the endpoint has no samples, or if the path never diffs at offset 0. `limit` default 20 / max 100 |
+| `GET /diffs/sample?endpoint=&id=` | one stored sample: `{ id, endpoint, timestamp, request_curl, baseline/candidate/control: { status?, body? } }` (bodies parsed back to JSON) for the inspect modal; `404` if absent (R45) |
 | `DELETE /diffs?endpoint=<ep>` | drops the endpoint's stored samples (stream + index); `204` on success, `404` if the endpoint has no samples (R43) |
 | `GET /suppress[?endpoint=]` | `{ endpoint, paths[] }` for one endpoint, or `{ "rules": { endpoint: paths[] } }` for all (R42) |
-| `PUT /suppress?endpoint=` | body `{ "paths": [...] }`; replaces that endpoint's rules and returns `{ endpoint, paths }`; effective on the next query (R42) |
+| `PUT /suppress?endpoint=` | body `{ "paths": [...] }` (subtree / `*` glob / `re:` regex); replaces that endpoint's rules and returns `{ endpoint, paths }`; effective on the next query; `400` on an invalid regex (R42/R44) |
 | `DELETE /suppress?endpoint=` | clears that endpoint's rules; `204` (R42) |
 | `GET /upstreams` | `{ baseline, candidate, control }` — scheme-normalized upstream base URLs (R38) |
 
@@ -179,7 +197,9 @@ endpoints for listing. The backend (Redis vs in-memory), the `sample-cap`, the
 **Sample entry** (`XADD MAXLEN ~ riffy:samples:{endpoint}`, trimmed to
 `storage.sample-cap` *per endpoint*; the stream key is `EXPIRE`d to
 `storage.window` so an endpoint that stops receiving traffic ages out), one per
-sampled request (R43):
+sampled request (R43). The XADD stream id doubles as the sample id surfaced by
+the read API (`RawSample.id`); `GET /diffs/sample` resolves it with `XRANGE id id`
+(the in-memory store uses a monotonic counter instead) (R45):
 
 | Field | Content |
 |-------|---------|

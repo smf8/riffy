@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
     let patterns: Vec<String> = cfg.endpoints.iter().map(|e| e.pattern.clone()).collect();
     let matcher = Arc::new(EndpointMatcher::new(&patterns));
     let engine = Arc::new(DiffEngine::new(
-        SuppressRules::from_config(&cfg.endpoints),
+        SuppressRules::from_config(&cfg.endpoints).context("invalid suppress_paths")?,
         EndpointClassifiers::from_config(&cfg.endpoints),
     ));
 

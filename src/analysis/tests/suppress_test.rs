@@ -12,16 +12,20 @@ fn endpoint(pattern: &str, suppress: &[&str]) -> EndpointConfig {
     }
 }
 
+fn rules(suppress: &[&str]) -> SuppressRules {
+    SuppressRules::from_config(&[endpoint("/a", suppress)]).expect("valid patterns")
+}
+
 #[test]
 fn exact_path_is_suppressed() {
-    let s = SuppressRules::from_config(&[endpoint("/a", &["user.name"])]);
+    let s = rules(&["user.name"]);
     assert!(s.is_suppressed("/a", "user.name"));
     assert!(!s.is_suppressed("/a", "user.id"));
 }
 
 #[test]
 fn child_of_suppressed_prefix_is_suppressed() {
-    let s = SuppressRules::from_config(&[endpoint("/a", &["meta"])]);
+    let s = rules(&["meta"]);
     assert!(s.is_suppressed("/a", "meta.ts"));
     assert!(s.is_suppressed("/a", "meta.v"));
     assert!(s.is_suppressed("/a", "meta"));
@@ -31,27 +35,27 @@ fn child_of_suppressed_prefix_is_suppressed() {
 #[test]
 fn no_false_positive_on_prefix_substring() {
     // "meta" must not suppress "metadata" (different segment).
-    let s = SuppressRules::from_config(&[endpoint("/a", &["meta"])]);
+    let s = rules(&["meta"]);
     assert!(!s.is_suppressed("/a", "metadata"));
     assert!(s.is_suppressed("/a", "meta.x"));
 }
 
 #[test]
 fn unknown_endpoint_suppresses_nothing() {
-    let s = SuppressRules::from_config(&[endpoint("/a", &["x"])]);
+    let s = rules(&["x"]);
     assert!(!s.is_suppressed("/b", "x"));
 }
 
 #[test]
 fn empty_suppress_list_is_noop() {
-    let s = SuppressRules::from_config(&[endpoint("/a", &[])]);
+    let s = SuppressRules::from_config(&[endpoint("/a", &[])]).unwrap();
     assert!(!s.is_suppressed("/a", "x"));
     assert!(s.rules().is_empty());
 }
 
 #[test]
 fn trailing_wildcard_matches_direct_children_only() {
-    let s = SuppressRules::from_config(&[endpoint("/a", &["meta.*"])]);
+    let s = rules(&["meta.*"]);
     assert!(s.is_suppressed("/a", "meta.ts"));
     assert!(s.is_suppressed("/a", "meta.v"));
     // Two levels deep — not matched by "meta.*"
@@ -61,7 +65,7 @@ fn trailing_wildcard_matches_direct_children_only() {
 
 #[test]
 fn midpath_wildcard_matches_indexed_field() {
-    let s = SuppressRules::from_config(&[endpoint("/a", &["items.*.id"])]);
+    let s = rules(&["items.*.id"]);
     assert!(s.is_suppressed("/a", "items.0.id"));
     assert!(s.is_suppressed("/a", "items.1.id"));
     assert!(!s.is_suppressed("/a", "items.0.name"));
@@ -70,27 +74,50 @@ fn midpath_wildcard_matches_indexed_field() {
 
 #[test]
 fn wildcard_requires_exact_segment_count() {
-    let s = SuppressRules::from_config(&[endpoint("/a", &["a.*"])]);
+    let s = rules(&["a.*"]);
     assert!(!s.is_suppressed("/a", "a.b.c"));
     assert!(s.is_suppressed("/a", "a.b"));
 }
 
 #[test]
-fn wildcard_does_not_match_extra_long_path() {
-    let s = SuppressRules::from_config(&[endpoint("/a", &["x.*.z"])]);
-    assert!(!s.is_suppressed("/a", "x.y.z.extra"));
+fn regex_matches_field_and_children() {
+    // A regex on a suffix: ignore any field ending in _at, and its children.
+    let s = rules(&["re:.*_at$"]);
+    assert!(s.is_suppressed("/a", "created_at"));
+    assert!(s.is_suppressed("/a", "user.updated_at"));
+    // children of a matched field are ignored too
+    assert!(s.is_suppressed("/a", "updated_at.tz"));
+    assert!(!s.is_suppressed("/a", "name"));
+    assert!(!s.is_suppressed("/a", "at_start"));
+}
+
+#[test]
+fn regex_anchored_to_segment_boundaries() {
+    // "re:^meta$" matches the meta field (and its children) but not "metadata".
+    let s = rules(&["re:^meta$"]);
+    assert!(s.is_suppressed("/a", "meta"));
+    assert!(s.is_suppressed("/a", "meta.ts"));
+    assert!(!s.is_suppressed("/a", "metadata"));
+}
+
+#[test]
+fn invalid_regex_is_rejected() {
+    let bad = SuppressRules::from_config(&[endpoint("/a", &["re:("])]);
+    assert!(bad.is_err());
 }
 
 #[test]
 fn with_endpoint_replaces_and_clears() {
-    let s = SuppressRules::from_config(&[endpoint("/a", &["x"])]);
+    let s = rules(&["x"]);
 
-    let replaced = s.with_endpoint("/a", vec!["y".to_owned(), "z".to_owned()]);
+    let replaced = s
+        .with_endpoint("/a", vec!["y".to_owned(), "z".to_owned()])
+        .unwrap();
     assert!(!replaced.is_suppressed("/a", "x"));
     assert!(replaced.is_suppressed("/a", "y"));
     assert!(replaced.is_suppressed("/a", "z"));
 
-    let cleared = replaced.with_endpoint("/a", Vec::new());
+    let cleared = replaced.with_endpoint("/a", Vec::new()).unwrap();
     assert!(!cleared.is_suppressed("/a", "y"));
     assert!(cleared.rules().is_empty());
 }
