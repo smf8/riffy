@@ -113,7 +113,9 @@ async fn status_mismatch_stores_status_without_body() {
 }
 
 #[tokio::test]
-async fn invalid_candidate_json_stored_without_body() {
+async fn same_status_invalid_candidate_json_discards_sample() {
+    // Candidate answered baseline's status but with a non-JSON body: storing it as
+    // a bodyless match would hide a real body regression, so the sample is dropped.
     let store = run_consumer(vec![message(
         "/api/v1/users/1",
         r#"{"a": 1}"#,
@@ -122,10 +124,8 @@ async fn invalid_candidate_json_stored_without_body() {
     )])
     .await;
 
-    let samples = stored(&store).await;
-    assert_eq!(samples.len(), 1);
-    assert_eq!(samples[0].candidate_status, Some(200));
-    assert_eq!(samples[0].candidate_body, None);
+    assert!(stored(&store).await.is_empty());
+    assert!(store.list_endpoints().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -160,9 +160,10 @@ async fn non_json_baseline_is_skipped_entirely() {
 }
 
 #[tokio::test]
-async fn oversized_baseline_is_skipped_and_oversized_candidate_dropped() {
-    // Cap below the candidate body but above the baseline: baseline stored,
-    // candidate body dropped.
+async fn oversized_baseline_and_oversized_same_status_candidate_are_skipped() {
+    // Cap below the candidate body but above the baseline. The candidate answered
+    // baseline's status, so its over-cap body cannot be stored for comparison and
+    // the whole sample is discarded rather than scored as a bodyless match.
     let store = run_consumer_with_cap(
         vec![message(
             "/api/v1/users/1",
@@ -173,9 +174,7 @@ async fn oversized_baseline_is_skipped_and_oversized_candidate_dropped() {
         12,
     )
     .await;
-    let samples = stored(&store).await;
-    assert_eq!(samples.len(), 1);
-    assert_eq!(samples[0].candidate_body, None);
+    assert!(stored(&store).await.is_empty());
 
     // Now a baseline over the cap skips the whole sample.
     let store = run_consumer_with_cap(

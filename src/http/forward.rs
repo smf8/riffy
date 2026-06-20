@@ -96,58 +96,63 @@ struct Dispatch {
 }
 
 fn dispatch_analysis(state: &AppState, endpoint: &ResolvedEndpoint, req: Dispatch) {
-    let Some(endpoint_key) = endpoint.clone() else {
-        return;
-    };
-
-    if !state.config.proxy.allow_http_side_effects {
-        match req.method {
-            Method::POST | Method::PUT | Method::PATCH | Method::DELETE => {
-                tracing::debug!(method = %req.method, "skipping fan-out for mutating method");
-                return;
-            }
-            _ => {}
-        }
-    }
-
-    let ep_cfg = state
-        .config
-        .endpoints
-        .iter()
-        .find(|e| e.pattern == endpoint_key.as_ref());
-
-    if ep_cfg.is_none() {
-        tracing::warn!(path_and_query = %req.path_and_query, "no registered endpoint config found");
-        return;
-    }
-
-    let ep_cfg = ep_cfg.unwrap();
-
-    // sample_rate=0.0 always skips; sample_rate=1.0 bypasses the RNG entirely.
-    let sample_rate = ep_cfg.sample_rate;
-    if sample_rate < 1.0 && rand::random::<f64>() >= sample_rate {
-        return;
-    }
-
-    let capture_request_curl = ep_cfg.capture_request_curl;
-    let store_credentials_header = ep_cfg.store_credentials_header;
-
+    let config = state.config.clone();
     let upstream = state.upstream.clone();
     let analysis_tx = state.analysis_tx.clone();
+    let endpoint = endpoint.clone();
+    // tokio::spawn does not propagate span context, so capture the request span up
+    // front to re-parent the detached analysis span and keep traces linked.
+    let parent_span = tracing::Span::current();
 
-    let Dispatch {
-        method,
-        path,
-        path_and_query,
-        headers,
-        body,
-        received_at,
-        baseline_response,
-    } = req;
+    // The whole decision (side-effect guard, endpoint-config lookup, sampling RNG)
+    // and fan-out run inside the spawned task so the proxy hot path returns the
+    // client response without paying any of this cost (R2).
+    tokio::spawn(async move {
+        let Some(endpoint_key) = endpoint else {
+            return;
+        };
 
-    let analysis_span = tracing::info_span!("analysis", endpoint = %endpoint_key);
+        if !config.proxy.allow_http_side_effects {
+            match req.method {
+                Method::POST | Method::PUT | Method::PATCH | Method::DELETE => {
+                    tracing::debug!(method = %req.method, "skipping fan-out for mutating method");
+                    return;
+                }
+                _ => {}
+            }
+        }
 
-    tokio::spawn(
+        let Some(ep_cfg) = config
+            .endpoints
+            .iter()
+            .find(|e| e.pattern == endpoint_key.as_ref())
+        else {
+            tracing::warn!(path_and_query = %req.path_and_query, "no registered endpoint config found");
+            return;
+        };
+
+        // sample_rate=0.0 always skips; sample_rate=1.0 bypasses the RNG entirely.
+        let sample_rate = ep_cfg.sample_rate;
+        if sample_rate < 1.0 && rand::random::<f64>() >= sample_rate {
+            return;
+        }
+
+        let capture_request_curl = ep_cfg.capture_request_curl;
+        let store_credentials_header = ep_cfg.store_credentials_header;
+
+        let Dispatch {
+            method,
+            path,
+            path_and_query,
+            headers,
+            body,
+            received_at,
+            baseline_response,
+        } = req;
+
+        let analysis_span =
+            tracing::info_span!(parent: &parent_span, "analysis", endpoint = %endpoint_key);
+
         async move {
             // bytes::Bytes is cheap to clone
             let candidate_body = body.clone();
@@ -215,6 +220,7 @@ fn dispatch_analysis(state: &AppState, endpoint: &ResolvedEndpoint, req: Dispatc
                 tracing::warn!(error = %e, "analysis channel unavailable, dropping diff");
             }
         }
-        .instrument(analysis_span),
-    );
+        .instrument(analysis_span)
+        .await;
+    });
 }

@@ -77,10 +77,7 @@ fn test_config() -> Riffy {
             endpoint: "http://localhost:4318".to_owned(),
             sampling_rate: 1.0,
         },
-        metrics: Metrics {
-            enabled: false,
-            port: 0,
-        },
+        metrics: Metrics { enabled: false },
     }
 }
 

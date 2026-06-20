@@ -158,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // AppState (and the analysis sender it holds) is dropped when select! returns,
-    // closing the channel. The consumer drains it, flushes one final aggregation, then exits.
+    // closing the channel. The consumer drains any buffered messages, then exits.
     match tokio::time::timeout(std::time::Duration::from_secs(5), consumer_handle).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!(error = %e, "analysis consumer task failed"),

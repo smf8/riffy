@@ -63,14 +63,22 @@ impl Consumer {
             return;
         };
 
-        let (candidate_status, candidate_body) = upstream_body(
+        let candidate = upstream_body(
             &msg.candidate_response,
             baseline_status,
             self.max_body_bytes,
         )
         .await;
-        let (control_status, control_body) =
+        let Some((candidate_status, candidate_body)) = classify(&endpoint, "candidate", candidate)
+        else {
+            return;
+        };
+
+        let control =
             upstream_body(&msg.control_response, baseline_status, self.max_body_bytes).await;
+        let Some((control_status, control_body)) = classify(&endpoint, "control", control) else {
+            return;
+        };
 
         let sample = RawSample {
             // The store assigns the id on write.
@@ -95,21 +103,58 @@ impl Consumer {
     }
 }
 
+enum UpstreamBody {
+    /// The upstream call failed: contributes nothing.
+    Failed,
+    /// Status diverged from baseline; the divergence is the signal, so the body is
+    /// deliberately not stored or compared.
+    StatusOnly(u16),
+    /// Status matched baseline and the body is storable JSON.
+    Matched(u16, String),
+    /// Status matched baseline but the body is not storable (non-JSON or over the
+    /// cap). Storing it as a bodyless match would make a real body regression score
+    /// as "no difference", so the whole sample is discarded instead.
+    Discard,
+}
+
 /// Bodies are only stored for an upstream that answered baseline's status — those
-/// are exactly the cases the read-time diff compares. A different status is the
-/// signal itself (recorded at read time), so its body is not stored; a failed
-/// upstream yields `(None, None)`.
+/// are exactly the cases the read-time diff compares.
 async fn upstream_body(
     response: &Option<UpstreamResponse>,
     baseline_status: u16,
     max_body_bytes: usize,
-) -> (Option<u16>, Option<String>) {
+) -> UpstreamBody {
     match response {
-        None => (None, None),
+        None => UpstreamBody::Failed,
         Some(r) if r.status == baseline_status => {
-            (Some(r.status), decoded_json_text(r, max_body_bytes).await)
+            match decoded_json_text(r, max_body_bytes).await {
+                Some(body) => UpstreamBody::Matched(r.status, body),
+                None => UpstreamBody::Discard,
+            }
         }
-        Some(r) => (Some(r.status), None),
+        Some(r) => UpstreamBody::StatusOnly(r.status),
+    }
+}
+
+/// Maps an upstream outcome to the stored `(status, body)`, or `None` to discard
+/// the whole sample (logging why) when the body cannot be stored for comparison.
+fn classify(
+    endpoint: &str,
+    upstream: &str,
+    body: UpstreamBody,
+) -> Option<(Option<u16>, Option<String>)> {
+    match body {
+        UpstreamBody::Failed => Some((None, None)),
+        UpstreamBody::StatusOnly(status) => Some((Some(status), None)),
+        UpstreamBody::Matched(status, body) => Some((Some(status), Some(body))),
+        UpstreamBody::Discard => {
+            tracing::error!(
+                endpoint = %endpoint,
+                upstream = %upstream,
+                "discarding sample: upstream matched baseline status but returned an unstorable body (non-json or over size cap)"
+            );
+            None
+        }
     }
 }
 

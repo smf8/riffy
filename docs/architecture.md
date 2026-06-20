@@ -31,24 +31,23 @@ flowchart TD
 
     subgraph proxyserver ["Proxy server — axum on server.proxy-port (src/http/router.rs, R24/R33)"]
         mw["track_proxy middleware<br/>resolve endpoint template once (unmatched → endpoint=undefined, R35);<br/>drop-guard records count + duration<br/>exactly once — real status, or<br/>status=cancelled if dropped (R21)<br/>(src/http/metrics.rs, R39)"]
-        guard{"mutating method and<br/>allow-http-side-effects=false?<br/>(src/http/forward.rs)"}
-        mw --> guard
     end
-
-    guard -- "yes" --> blocked(["405 Method Not Allowed<br/>(no upstream is contacted)"])
 
     subgraph hotpath ["HOT PATH — client-blocking; must never carry analysis work (R2)"]
         baseline["UpstreamClient.send → BASELINE<br/>reqwest, .no_proxy() (R18), scheme derived<br/>from address (R33), hop-by-hop headers stripped<br/>(src/upstream/client.rs)"]
         resp(["Client response<br/>= baseline response, always (Q13/R3)"])
-        guard -- "no" --> baseline --> resp
+        mw --> baseline --> resp
     end
 
-    baseline -. "tokio::spawn — fire-and-forget" .-> sampledecide
+    baseline -. "tokio::spawn — fire-and-forget; the whole decision runs off the hot path (R2)" .-> guard
 
     subgraph background ["Background task, one per request (src/http/forward.rs)"]
+        guard{"mutating method and<br/>allow-http-side-effects=false?"}
         sampledecide{"sample_rate gate:<br/>rand() &lt; sample_rate?<br/>(per-endpoint)"}
         fanout["tokio::join!<br/>CANDIDATE + CONTROL in parallel<br/>(src/upstream/client.rs)"]
         send["try_send AnalysisMessage<br/>bounded mpsc, capacity = pipeline.channel-capacity<br/>(default 1024, R32); drop newest + warn when full (R12);<br/>carries an optional RequestSnapshot when the endpoint set<br/>capture_request_curl (R38)<br/>(src/pipeline/mod.rs)"]
+        guard -- "yes" --> blocked(["mutating method —<br/>no fan-out; baseline already<br/>answered the client (R3)"])
+        guard -- "no" --> sampledecide
         sampledecide -- "no" --> dropped(["not sampled —<br/>no fan-out, no sample"])
         sampledecide -- "yes" --> fanout --> send
     end
@@ -59,7 +58,7 @@ flowchart TD
         recv["recv AnalysisMessage"]
         resolve["EndpointMatcher.resolve → Option<br/>matchit radix tree (R40); :param segment match,<br/>most specific template wins, slashes normalized, query stripped;<br/>unregistered path → drop, not stored (R35)<br/>(src/endpoint/mod.rs)"]
         baselinebody["decode + validate baseline body:<br/>decode_body — gzip / x-gzip / deflate(zlib) / br / zstd<br/>via async-compression (R20); must be JSON within<br/>storage.max-body-bytes (R44), else skip the whole sample<br/>(src/pipeline/decode.rs, consumer.rs)"]
-        otherbodies["per candidate/control:<br/>status = None if the call failed; body stored only when<br/>status == baseline AND JSON within max-body-bytes —<br/>exactly the cases read-time diff compares (R41)"]
+        otherbodies["per candidate/control:<br/>failed call → status None; divergent status → status only, no body;<br/>same status → store JSON body, but DISCARD the whole sample<br/>if that body is non-JSON or over max-body-bytes, so it never<br/>scores as a false 'no difference' (R41)"]
         curl["render request_curl from the snapshot<br/>($RIFFY_TARGET placeholder host, R38)<br/>(src/pipeline/curl.rs)"]
         append["SampleStore.append_sample(RawSample)<br/>(src/storage/, R43)"]
         recv --> resolve --> baselinebody --> otherbodies --> curl --> append
@@ -181,10 +180,11 @@ guard (R21, `src/telemetry/timer.rs`): when a future is dropped at an `.await`
 sample with the `cancelled` outcome instead of losing it. Consumer-side metrics
 need no guard — they run in a detached task that client cancellation cannot drop.
 
-**Trace export (R33):** when `logging.otlp.enabled` (off by default), spans are
-exported to a Jaeger collector over OTLP/HTTP (`logging.otlp.endpoint`, default
-the local Jaeger OTLP receiver) via a `tracing-opentelemetry` layer on the same
-subscriber. The batch exporter reuses reqwest/rustls and is flushed on shutdown.
+**Trace export (R33):** when `jaeger.enabled` (off by default), spans are
+exported to a Jaeger collector over OTLP/HTTP (`jaeger.endpoint`, default the
+local Jaeger OTLP receiver) at the `jaeger.sampling_rate` ratio via a
+`tracing-opentelemetry` layer on the same subscriber. The batch exporter reuses
+reqwest/rustls and is flushed on shutdown.
 
 ## Data written to Redis
 
@@ -221,19 +221,26 @@ path (R36).
 ## Invariants (do not regress)
 
 1. **Hot path is sacred (R2):** nothing between "request received" and "baseline
-   response returned" may block on, wait for, or compute analysis. Candidate
-   and control calls, body decoding, sample storage, and all diffing live behind
-   `tokio::spawn` + the mpsc channel (background) or behind the admin query API
-   (read time).
+   response returned" may block on, wait for, or compute analysis. The whole
+   dispatch decision — the side-effect guard, the endpoint-config lookup, and the
+   sampling RNG — plus the candidate and control calls, body decoding, sample
+   storage, and all diffing live behind `tokio::spawn` + the mpsc channel
+   (background) or behind the admin query API (read time). The hot path only
+   resolves the endpoint label for metrics, calls baseline, and returns.
 2. **The client always receives the baseline response (Q13/R3).** There is no
    response-mode configuration.
-3. **Mutating methods (POST/PUT/PATCH/DELETE) are blocked before any upstream
-   is contacted** unless `proxy.allow-http-side-effects` is set (Q11).
+3. **Mutating methods (POST/PUT/PATCH/DELETE) are never fanned out to
+   candidate/control** unless `proxy.allow-http-side-effects` is set (Q11). The
+   baseline upstream always receives the request — it is the response the client
+   gets (R3) — so the guard skips only the background fan-out; no request is ever
+   rejected and no 405 is returned.
 4. **The producer only records raw data (R41):** sampling decision +
    `append_sample`. Diffing, suppression, detection, and aggregation happen
    exclusively at read time in the `DiffEngine`. A non-JSON or over-cap baseline
-   skips the sample entirely; a candidate/control body is stored only when it
-   answered baseline's status with JSON within the cap.
+   skips the sample entirely; likewise a candidate or control that answered
+   baseline's status but returned a non-JSON or over-cap body discards the whole
+   sample, so it can never score as a false "no difference". A divergent status
+   stores the status without a body.
 5. **Suppression is applied during the diff and is runtime-writable (R42):** the
    `DiffEngine` holds rules in an `ArcSwap<SuppressRules>`, seeded from config and
    replaced wholesale by `/suppress`; a suppressed path is never counted or shown,

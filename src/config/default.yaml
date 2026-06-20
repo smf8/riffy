@@ -38,5 +38,5 @@ jaeger:
   sampling_rate: 1.0
 
 metrics:
+  # Metrics are served on the admin server's /metrics route (server.admin_port).
   enabled: true
-  port: 9090

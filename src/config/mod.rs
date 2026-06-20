@@ -204,8 +204,6 @@ pub struct Jaeger {
 pub struct Metrics {
     #[garde(skip)]
     pub enabled: bool,
-    #[garde(skip)]
-    pub port: u16,
 }
 
 pub fn load(cli: &CliOverrides) -> anyhow::Result<Riffy> {
