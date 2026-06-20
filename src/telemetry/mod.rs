@@ -9,8 +9,22 @@ use opentelemetry_sdk::Resource;
 
 pub mod timer;
 
+/// Seconds-scale buckets shared by all duration histograms (proxy request,
+/// upstream call, sample-store lag), spanning sub-millisecond in-cluster calls up
+/// to the upstream timeout ceiling.
+const LATENCY_BUCKETS: &[f64] = &[
+    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+];
+
 pub fn install_prometheus() -> anyhow::Result<metrics_exporter_prometheus::PrometheusHandle> {
-    Ok(metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?)
+    // Set explicit buckets so histograms export as Prometheus histograms
+    // (_bucket/_sum/_count) rather than the exporter's default summaries, whose
+    // client-side quantiles cannot be aggregated across instances or recomputed
+    // with histogram_quantile().
+    Ok(metrics_exporter_prometheus::PrometheusBuilder::new()
+        .set_buckets(LATENCY_BUCKETS)
+        .context("setting prometheus histogram buckets")?
+        .install_recorder()?)
 }
 
 pub fn init_tracing(

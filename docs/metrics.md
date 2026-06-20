@@ -6,31 +6,28 @@ queries you can build panels from. Metrics are scraped from the admin server's
 `metrics.enabled = false`. Each metric is defined in the module that emits it
 (see `docs/architecture.md`).
 
-## ⚠️ Critical caveat: histograms are exported as *summaries*, not buckets
+## Histogram buckets
 
-`telemetry::install_prometheus()` calls `PrometheusBuilder::new().install_recorder()`
-with **no buckets configured**, so every `histogram!` is rendered by
-`metrics-exporter-prometheus` as a Prometheus **summary** — client-computed
-quantiles, not `_bucket` series. Consequences:
+`telemetry::install_prometheus()` configures explicit seconds-scale buckets, so
+every `histogram!` exports as a true Prometheus histogram with
+`_bucket`/`_sum`/`_count` series. Compute percentiles with `histogram_quantile()`
+over the bucket rate — any quantile can be derived after the fact and percentiles
+aggregate correctly across instances (unlike client-side summary quantiles).
 
-- **Use the `quantile` label directly** — `..._seconds{quantile="0.99"}`. Default
-  quantiles exposed: `0`, `0.5`, `0.9`, `0.95`, `0.99`, `0.999`, `1`.
-- **`histogram_quantile()` will NOT work** — there are no `_bucket` series.
-- You still get `..._seconds_sum` and `..._seconds_count` for rates and averages.
+Configured buckets (seconds):
+`0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0`
 
-If you'd rather have real bucketed histograms (flexible percentiles, aggregatable
-across instances), add `.set_buckets(...)` in `install_prometheus`. The queries
-below then switch to
-`histogram_quantile(0.99, sum by (le, ...) (rate(..._bucket[$__rate_interval])))`.
+To change the resolution or range, edit `LATENCY_BUCKETS` in
+`src/telemetry/mod.rs`.
 
 ## Emitted metrics
 
 | Metric | Type (exported as) | Labels |
 |---|---|---|
 | `riffy_proxy_request_total` | counter | `method`, `endpoint`, `status` (HTTP code or `cancelled`) |
-| `riffy_proxy_request_duration_seconds` | histogram → **summary** | `method`, `endpoint` |
-| `riffy_upstream_request_duration_seconds` | histogram → **summary** | `upstream` (`baseline`/`candidate`/`control`), `endpoint`, `outcome` (`ok`/`error`/`cancelled`) |
-| `riffy_sample_store_lag_seconds` | histogram → **summary** | *(none)* |
+| `riffy_proxy_request_duration_seconds` | histogram | `method`, `endpoint` |
+| `riffy_upstream_request_duration_seconds` | histogram | `upstream` (`baseline`/`candidate`/`control`), `endpoint`, `outcome` (`ok`/`error`/`cancelled`) |
+| `riffy_sample_store_lag_seconds` | histogram | *(none)* |
 | `riffy_samples_stored_total` | counter | `endpoint` |
 
 `endpoint` is the resolved template (e.g. `/api/v1/users/:id`) or `undefined` for
@@ -73,8 +70,10 @@ sum by (endpoint) (rate(riffy_proxy_request_total{status="cancelled"}[$__rate_in
 ### Client-facing latency (the baseline hot path)
 
 ```promql
-# p99 / p90 / p50 by endpoint — pick the quantile via the label
-riffy_proxy_request_duration_seconds{quantile="0.99", endpoint="$endpoint"}
+# p99 latency by endpoint (swap 0.99 for any quantile)
+histogram_quantile(0.99,
+  sum by (le, endpoint) (rate(riffy_proxy_request_duration_seconds_bucket[$__rate_interval]))
+)
 
 # Average latency by endpoint
 sum by (endpoint) (rate(riffy_proxy_request_duration_seconds_sum[$__rate_interval]))
@@ -85,7 +84,9 @@ sum by (endpoint) (rate(riffy_proxy_request_duration_seconds_sum[$__rate_interva
 
 ```promql
 # p99 latency per upstream (one series each: baseline/candidate/control)
-riffy_upstream_request_duration_seconds{quantile="0.99", endpoint="$endpoint"}
+histogram_quantile(0.99,
+  sum by (le, upstream) (rate(riffy_upstream_request_duration_seconds_bucket{endpoint="$endpoint"}[$__rate_interval]))
+)
 
 # Average latency per upstream
 sum by (upstream) (rate(riffy_upstream_request_duration_seconds_sum{endpoint="$endpoint"}[$__rate_interval]))
@@ -129,7 +130,9 @@ sum by (endpoint) (rate(riffy_samples_stored_total[$__rate_interval]))
   / sum by (endpoint) (rate(riffy_proxy_request_total[$__rate_interval]))
 
 # Store lag p99 — time from request receipt to sample persisted (producer→consumer→store)
-riffy_sample_store_lag_seconds{quantile="0.99"}
+histogram_quantile(0.99,
+  sum by (le) (rate(riffy_sample_store_lag_seconds_bucket[$__rate_interval]))
+)
 
 # Store lag average
 rate(riffy_sample_store_lag_seconds_sum[$__rate_interval])
