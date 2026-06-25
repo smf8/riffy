@@ -5,16 +5,18 @@ use chrono::{DateTime, Utc};
 
 fn sample_at(endpoint: &str, tag: &str, timestamp: DateTime<Utc>) -> RawSample {
     RawSample {
-        // The store assigns the real id on write.
         id: String::new(),
         endpoint: endpoint.to_owned(),
         timestamp,
         baseline_status: 200,
         baseline_body: format!(r#"{{"v":"{tag}"}}"#),
+        baseline_headers: r#"{"content-type":"application/json"}"#.to_owned(),
         candidate_status: Some(200),
         candidate_body: Some(format!(r#"{{"v":"{tag}-c"}}"#)),
+        candidate_headers: Some(r#"{"content-type":"application/json"}"#.to_owned()),
         control_status: Some(200),
         control_body: Some(format!(r#"{{"v":"{tag}"}}"#)),
+        control_headers: Some(r#"{"content-type":"application/json"}"#.to_owned()),
         request_curl: None,
     }
 }
@@ -66,7 +68,6 @@ async fn cap_trims_oldest_per_endpoint() {
     }
     let got = store.fetch_samples("/e").await.unwrap();
     assert_eq!(got.len(), 2);
-    // Newest-first: s2 then s1; s0 was trimmed.
     assert_eq!(got[0].baseline_body, r#"{"v":"s2"}"#);
     assert_eq!(got[1].baseline_body, r#"{"v":"s1"}"#);
 }
@@ -77,7 +78,6 @@ async fn get_sample_by_id_hit_and_miss() {
     store.append_sample(&sample("/e", "x")).await.unwrap();
     store.append_sample(&sample("/e", "y")).await.unwrap();
 
-    // The store assigns ids on write; fetch to learn one.
     let fetched = store.fetch_samples("/e").await.unwrap();
     let id = &fetched[0].id;
     assert!(!id.is_empty());

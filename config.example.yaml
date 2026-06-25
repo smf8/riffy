@@ -1,9 +1,9 @@
 proxy:
   allow_http_side_effects: false
 
-# Analysis pipeline tuning. Optional — omit to use the defaults shown.
-pipeline:
-  # Bounded capacity of the proxy → analysis_consumer channel. When the
+# Sample consumer tuning. Optional — omit to use the defaults shown.
+consumer:
+  # Bounded capacity of the proxy → sample-consumer channel. When the
   # consumer falls behind, the newest message is dropped with a warning
   # (backpressure by shedding, never unbounded queueing).
   channel_capacity: 1024

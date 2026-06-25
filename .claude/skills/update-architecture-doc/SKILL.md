@@ -24,9 +24,9 @@ wrong — fix it to follow the code.
 1. Read the current `docs/architecture.md` and the diff you just made.
 2. Trace the affected path in code — do not write from memory. The flow lives
    in: `src/http/router.rs` → `src/telemetry/metrics.rs` (middleware) →
-   `src/http/forward.rs` → `src/upstream/client.rs` → `src/pipeline/mod.rs` →
-   `src/pipeline/consumer.rs` (→ `decode.rs`, `src/endpoint/`,
-   `src/analysis/`, `src/compare/`) → `src/storage/`.
+   `src/http/forward.rs` → `src/upstream/client.rs` → `src/consumer/mod.rs` →
+   `src/consumer/sample.rs` (→ `src/upstream/body.rs`, `src/upstream/header.rs`,
+   `src/endpoint/`, `src/analysis/`, `src/compare/`) → `src/storage/`.
 3. Update the DAG nodes/edges and the tables together — a table that
    contradicts the diagram is worse than no update.
 4. Verify every literal name against code before saving (names must be

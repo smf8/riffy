@@ -14,13 +14,15 @@ pub enum DiffType {
     SeqSize,
     Ordering,
     TypeMismatch,
-    /// HTTP status-code divergence at `STATUS_FIELD`; the body is not compared.
     StatusMismatch,
 }
 
-/// Reserved field path for a status-code divergence. The leading `:` cannot
-/// collide with a flattened JSON dot-path, so it is safe as a synthetic key.
+// A leading ':' can't occur in a flattened JSON dot-path, so it's collision-free.
 pub const STATUS_FIELD: &str = ":status";
+
+// ':headers.<name>' namespaces header diffs apart from body paths; a ':headers'
+// subtree suppress rule then hides every header at once.
+pub const HEADER_FIELD_PREFIX: &str = ":headers";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldDiff {

@@ -2,9 +2,6 @@ use std::collections::HashMap;
 
 use crate::config::{EndpointConfig, Threshold};
 
-/// Per-field diff tallies computed at read time from the stored raw samples.
-/// The regression verdict and percentages are derived from the live thresholds,
-/// so changing a threshold reclassifies every endpoint instantly.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FieldCounts {
     pub raw_count: u64,
@@ -12,7 +9,6 @@ pub struct FieldCounts {
 }
 
 impl FieldCounts {
-    /// `|raw − noise| / (raw + noise) × 100`. Zero when both counters are zero.
     pub fn relative_difference(&self) -> f64 {
         let raw = self.raw_count as f64;
         let noise = self.noise_count as f64;
@@ -23,7 +19,6 @@ impl FieldCounts {
         (raw - noise).abs() / denominator * 100.0
     }
 
-    /// `|raw − noise| / endpoint_total × 100`. Zero when no requests recorded.
     pub fn absolute_difference(&self, endpoint_total: u64) -> f64 {
         if endpoint_total == 0 {
             return 0.0;

@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use super::RequestSnapshot;
+use crate::upstream::header::is_hop_by_hop;
 use axum::http::HeaderMap;
 use bytes::Bytes;
 
@@ -18,16 +19,8 @@ const CREDENTIAL_HEADERS: &[&str] = &[
     "x-auth-token",
 ];
 
-// curl derives `host` from the URL and recomputes `content-length`; hop-by-hop headers must not be replayed.
-const SKIP_HEADERS: &[&str] = &[
-    "host",
-    "content-length",
-    "connection",
-    "keep-alive",
-    "transfer-encoding",
-    "te",
-    "upgrade",
-];
+// curl derives `host` from the URL and recomputes `content-length`.
+const CURL_DROPPED_HEADERS: &[&str] = &["host", "content-length"];
 
 pub fn build_curl(snap: &RequestSnapshot) -> String {
     let mut lines: Vec<String> = Vec::new();
@@ -49,8 +42,7 @@ pub fn build_curl(snap: &RequestSnapshot) -> String {
         ));
     }
 
-    // The omitted-body note is a trailing comment with no line-continuation
-    // backslash before it, so it never folds into the command.
+    // Trailing note: no line-continuation backslash, so it never folds into the command.
     let mut trailer: Option<String> = None;
     match body_arg(&snap.body) {
         BodyArg::Inline(text) => lines.push(format!("  --data-raw {}", shell_quote(&text))),
@@ -68,7 +60,10 @@ pub fn build_curl(snap: &RequestSnapshot) -> String {
 fn sorted_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = headers
         .iter()
-        .filter(|(name, _)| !SKIP_HEADERS.contains(&name.as_str()))
+        .filter(|(name, _)| {
+            let name = name.as_str();
+            !CURL_DROPPED_HEADERS.contains(&name) && !is_hop_by_hop(name)
+        })
         .map(|(name, value)| {
             (
                 name.as_str().to_owned(),

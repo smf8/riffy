@@ -119,7 +119,7 @@ sum(rate(riffy_upstream_request_duration_seconds_count{upstream="control", outco
   / sum(rate(riffy_upstream_request_duration_seconds_count{upstream="control"}[$__rate_interval]))
 ```
 
-### Sampling & pipeline health
+### Sampling & consumer health
 
 ```promql
 # Samples actually stored per second, by endpoint

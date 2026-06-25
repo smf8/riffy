@@ -25,7 +25,7 @@ pub struct Riffy {
     #[garde(dive)]
     pub proxy: Proxy,
     #[garde(dive)]
-    pub pipeline: Pipeline,
+    pub consumer: Consumer,
     #[garde(dive)]
     pub upstream: Upstream,
     #[garde(dive)]
@@ -51,7 +51,7 @@ pub struct Proxy {
 
 #[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
-pub struct Pipeline {
+pub struct Consumer {
     #[garde(range(min = 1))]
     pub channel_capacity: usize,
 }
@@ -70,8 +70,7 @@ pub struct Upstream {
     pub timeout: Duration,
 }
 
-/// diffy defaults: 20% relative, 0.03% absolute. Kept in code (not default.yaml)
-/// because they are per-endpoint and duplicated into each EndpointConfig.
+// Per-endpoint, so kept in code rather than default.yaml (diffy defaults 20% / 0.03%).
 #[derive(Debug, Clone, Copy, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Threshold {
@@ -112,26 +111,15 @@ pub struct EndpointConfig {
     #[garde(dive)]
     #[serde(default)]
     pub threshold: Threshold,
-    /// JSON paths excluded from diff analysis. Three match modes (see
-    /// `analysis::suppress`): plain subtree (`"a.b"` also hides `"a.b.c"`),
-    /// `*` glob (one segment), and `re:<regex>` (matches the field or any of its
-    /// children).
     #[garde(skip)]
     #[serde(default)]
     pub suppress_paths: Vec<String>,
-    /// Fraction of requests to fan out to candidate/control (0.0–1.0).
-    /// Sampled-out requests are still proxied baseline-only; analysis is skipped.
     #[garde(range(min = 0.0, max = 1.0))]
     #[serde(default = "default_sample_rate")]
     pub sample_rate: f64,
-    /// Capture the originating request as a replayable curl on each stored diff.
-    /// Opt-in because it persists request headers/body to storage.
     #[garde(skip)]
     #[serde(default)]
     pub capture_request_curl: bool,
-    /// Store credential header values verbatim in the captured curl.
-    /// When false, credential headers are listed but their values are redacted.
-    /// Only meaningful when `capture_request_curl` is set.
     #[garde(skip)]
     #[serde(default)]
     pub store_credentials_header: bool,
@@ -140,16 +128,11 @@ pub struct EndpointConfig {
 #[derive(Debug, Deserialize, garde::Validate)]
 #[serde(rename_all = "snake_case")]
 pub struct Storage {
-    /// Per-endpoint cap on retained raw samples; oldest is dropped past it.
     #[garde(range(min = 1))]
     pub sample_cap: usize,
-    /// Samples older than this window are ignored at read time, so the regression
-    /// verdict reflects only recent traffic.
     #[garde(skip)]
     #[serde(with = "humantime_serde")]
     pub window: Duration,
-    /// A decoded upstream body over this size is not stored: baseline over the cap
-    /// skips the whole sample, candidate/control over it are stored without a body.
     #[garde(range(min = 1))]
     pub max_body_bytes: usize,
     #[garde(dive)]
@@ -189,12 +172,8 @@ pub struct Logging {
 pub struct Jaeger {
     #[garde(skip)]
     pub enabled: bool,
-    /// OTLP/HTTP base endpoint of the Jaeger collector (port 4318).
-    /// The exporter appends `/v1/traces` automatically.
     #[garde(skip)]
     pub endpoint: String,
-    /// Uses `TraceIdRatioBased` wrapped in `ParentBased`, so child spans
-    /// follow the parent's sampling decision.
     #[garde(range(min = 0.0, max = 1.0))]
     pub sampling_rate: f64,
 }

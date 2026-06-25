@@ -11,10 +11,8 @@ const DEFAULT_WINDOW_SECS: u64 = 3600;
 
 pub struct InMemorySampleStore {
     endpoints: Mutex<HashMap<String, VecDeque<RawSample>>>,
-    /// Max retained samples per endpoint; oldest is dropped when exceeded.
     cap: usize,
     window_secs: u64,
-    /// Monotonic source for sample ids (mirrors Redis assigning a stream id).
     next_id: AtomicU64,
 }
 

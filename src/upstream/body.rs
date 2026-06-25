@@ -3,9 +3,9 @@ use std::borrow::Cow;
 use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
 use tokio::io::AsyncReadExt;
 
-use crate::upstream::client::UpstreamResponse;
+use super::client::UpstreamResponse;
 
-pub async fn decode_body(response: &UpstreamResponse) -> Option<Cow<'_, [u8]>> {
+pub async fn decode_compressed_body(response: &UpstreamResponse) -> Option<Cow<'_, [u8]>> {
     let Some(value) = response.headers.get(axum::http::header::CONTENT_ENCODING) else {
         return Some(Cow::Borrowed(response.body.as_ref()));
     };

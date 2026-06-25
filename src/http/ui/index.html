@@ -272,6 +272,13 @@
                   <div class="st muted">status:
                     <span x-text="('status' in modal[u]) ? modal[u].status : 'no response'"></span>
                   </div>
+                  <template x-if="'headers' in modal[u]">
+                    <div>
+                      <div class="st muted" style="margin-top:.45rem">headers</div>
+                      <pre class="body" x-text="bodyText(modal[u].headers)" x-cloak></pre>
+                    </div>
+                  </template>
+                  <div class="st muted" style="margin-top:.45rem" x-show="'body' in modal[u]">body</div>
                   <pre class="body" x-show="'body' in modal[u]" x-text="bodyText(modal[u].body)" x-cloak></pre>
                   <p class="muted" x-show="!('body' in modal[u])">no body stored</p>
                 </div>

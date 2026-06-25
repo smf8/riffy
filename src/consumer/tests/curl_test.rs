@@ -1,5 +1,5 @@
-use crate::pipeline::curl::{build_curl, TARGET_PLACEHOLDER};
-use crate::pipeline::RequestSnapshot;
+use crate::consumer::curl::{build_curl, TARGET_PLACEHOLDER};
+use crate::consumer::RequestSnapshot;
 use axum::http::{HeaderMap, Method};
 use bytes::Bytes;
 
@@ -60,7 +60,6 @@ fn redacts_credential_headers_when_enabled() {
     assert!(curl.contains("-H 'authorization: <redacted>'"));
     assert!(curl.contains("-H 'cookie: <redacted>'"));
     assert!(curl.contains("-H 'x-api-key: <redacted>'"));
-    // Non-credential headers are untouched.
     assert!(curl.contains("-H 'accept: application/json'"));
     assert!(!curl.contains("Bearer secret"));
     assert!(!curl.contains("session=abc"));
@@ -127,7 +126,6 @@ fn escapes_single_quotes_in_body_and_headers() {
         true,
     ));
 
-    // Each literal single quote becomes the shell-safe sequence '\''.
     assert!(curl.contains(r"'$RIFFY_TARGET/x?name=o'\''brien'"));
     assert!(curl.contains(r"-H 'x-note: it'\''s fine'"));
     assert!(curl.contains(r"--data-raw 'a'\''b'"));
@@ -145,7 +143,6 @@ fn omits_binary_body_with_comment() {
 
     assert!(curl.contains("# body omitted (binary)"));
     assert!(!curl.contains("--data-raw"));
-    // The comment is on its own line, not folded into the command.
     assert!(!curl.contains(" \\\n  # body omitted"));
 }
 

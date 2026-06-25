@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::consumer::{AnalysisMessage, RequestSnapshot};
 use crate::error::AppError;
 use crate::http::metrics::{ResolvedEndpoint, UNMATCHED_ENDPOINT};
 use crate::http::router::AppState;
-use crate::pipeline::{AnalysisMessage, RequestSnapshot};
 use crate::upstream::client::UpstreamResponse;
 use crate::upstream::metrics::{outcome, request_timer};
 use axum::body::Bytes;

@@ -25,10 +25,35 @@ fn sample(baseline: &str, candidate: Option<&str>, control: Option<&str>) -> Raw
         timestamp: Utc::now(),
         baseline_status: 200,
         baseline_body: baseline.to_owned(),
+        baseline_headers: "{}".to_owned(),
         candidate_status: candidate.map(|_| 200),
         candidate_body: candidate.map(|b| b.to_owned()),
+        candidate_headers: candidate.map(|_| "{}".to_owned()),
         control_status: control.map(|_| 200),
         control_body: control.map(|b| b.to_owned()),
+        control_headers: control.map(|_| "{}".to_owned()),
+        request_curl: None,
+    }
+}
+
+fn sample_with_headers(
+    baseline: (&str, &str),
+    candidate: (&str, &str),
+    control: (&str, &str),
+) -> RawSample {
+    RawSample {
+        id: String::new(),
+        endpoint: EP.to_owned(),
+        timestamp: Utc::now(),
+        baseline_status: 200,
+        baseline_body: baseline.0.to_owned(),
+        baseline_headers: baseline.1.to_owned(),
+        candidate_status: Some(200),
+        candidate_body: Some(candidate.0.to_owned()),
+        candidate_headers: Some(candidate.1.to_owned()),
+        control_status: Some(200),
+        control_body: Some(control.0.to_owned()),
+        control_headers: Some(control.1.to_owned()),
         request_curl: None,
     }
 }
@@ -83,6 +108,54 @@ fn failed_upstream_contributes_nothing() {
 }
 
 #[test]
+fn header_diff_is_namespaced_counted_and_suppressible() {
+    let s = sample_with_headers(
+        (r#"{"ok":true}"#, r#"{"content-type":"application/json"}"#),
+        (r#"{"ok":true}"#, r#"{"content-type":"text/html"}"#),
+        (r#"{"ok":true}"#, r#"{"content-type":"application/json"}"#),
+    );
+    let eng = engine();
+
+    let counts = eng
+        .aggregate(EP, std::slice::from_ref(&s), &none())
+        .unwrap();
+    let field = counts
+        .fields
+        .get(":headers.content-type")
+        .expect("header field");
+    assert_eq!(field.raw_count, 1);
+    assert_eq!(field.noise_count, 0);
+    assert_eq!(
+        eng.regressions(&counts),
+        vec![":headers.content-type".to_owned()]
+    );
+
+    eng.set_suppress(EP, vec![":headers".to_owned()]).unwrap();
+    let after = eng
+        .aggregate(EP, std::slice::from_ref(&s), &none())
+        .unwrap();
+    assert!(after.fields.is_empty());
+}
+
+#[test]
+fn diverging_status_skips_header_comparison() {
+    let mut s = sample_with_headers(
+        (r#"{"ok":true}"#, r#"{"content-type":"application/json"}"#),
+        (r#"{"ok":true}"#, r#"{"content-type":"text/html"}"#),
+        (r#"{"ok":true}"#, r#"{"content-type":"application/json"}"#),
+    );
+    s.candidate_status = Some(500);
+    s.candidate_body = None;
+    s.candidate_headers = None;
+
+    let counts = engine()
+        .aggregate(EP, std::slice::from_ref(&s), &none())
+        .unwrap();
+    assert!(counts.fields.contains_key(STATUS_FIELD));
+    assert!(!counts.fields.keys().any(|k| k.starts_with(":headers")));
+}
+
+#[test]
 fn suppression_applied_during_diff() {
     let eng = engine();
     let s = sample(
@@ -125,7 +198,6 @@ fn extra_suppress_excludes_without_persisting() {
     assert!(!preview.fields.contains_key("a"));
     assert!(preview.fields.contains_key("b"));
 
-    // The stored rules were never touched: a plain aggregate still sees "a".
     let stored = eng
         .aggregate(EP, std::slice::from_ref(&s), &none())
         .unwrap();
@@ -140,8 +212,6 @@ fn invalid_regex_rule_is_rejected() {
 #[test]
 fn regressions_rollup_lists_regressing_paths() {
     let eng = engine();
-    // "a" diverges on candidate only (raw>noise → regression); "b" is pure noise
-    // (control diverges, candidate matches → not a regression).
     let s = sample(
         r#"{"a":1,"b":1}"#,
         Some(r#"{"a":2,"b":1}"#),

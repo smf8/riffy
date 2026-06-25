@@ -78,7 +78,10 @@ Every use of `.unwrap()` or `.expect()` in non-test code requires an explicit co
 - **Trait definitions always live in `mod.rs`** of their module.
 - Implementations live in separate files within the module directory.
 - Unit tests **must be in a separate file** — never inline in the same file as the implementation. Place them in a `tests/` subdirectory of the module or in `tests/` at the crate root.
-- **No descriptive comments.** Do not use `//`, `///`, or `//!` to explain what a function, struct, module, or field does — the code is self-explanatory. Only add a comment when the **WHY** is non-obvious: a hidden constraint, a subtle invariant, an RFC reference, a workaround for a specific bug, or a design decision that would surprise a reader. If removing the comment wouldn't confuse a future reader, don't write it.
+- **Comment like a senior Rust engineer with a mostly-Go background would.** Write self-explanatory code and add a comment **only where a human would actually put one** — sparing, terse, and explaining the **WHY**, never the what. Legitimate reasons to comment: a hidden constraint, a subtle invariant, an RFC reference, a bug workaround, an `unwrap()`/`expect()` safety proof, or a design decision that would surprise a reader. If removing the comment wouldn't confuse a future reader, don't write it.
+  - **Never** use `//`, `///`, or `//!` to describe what a function, struct, module, field, enum variant, or test *does*. Delete such docs outright — do not just trim them. Keep the rare surviving WHY comment to a single line.
+  - This applies to **test code too**: the test name plus its assertions are the spec — do not narrate what a test sets up or checks.
+  - **The one exception:** `///` on a clap `#[derive(Parser)]` struct and its fields *is* the `--help` text (functional, not descriptive) — keep it. serde/`garde` config structs get no such pass; their `///` are descriptive and must go.
 
 ---
 
@@ -125,13 +128,13 @@ Examples:
 - **Test application logic and functionality only.** Cover the things that
   encode behavior the product depends on: the diff engine, flatten, endpoint
   matching, analysis calculations, config parsing/validation, storage round-trips,
-  the pipeline/consumer, and the curl renderer.
+  the sample consumer, and the curl renderer.
 - **Do NOT write tests for observability plumbing.** Metrics (Prometheus
   counters/histograms, label shapes, the guarded timer) and traces (span/sampler
   wiring) are not application logic — do not add unit tests for them. This extends
   to any similar cross-cutting instrumentation whose only job is to report on the
   system rather than implement its behavior.
 - Write **unit tests** for pure logic and **integration tests** for the proxy
-  handler and pipeline consumer.
+  handler and sample consumer.
 - Tests live in separate files — never co-located with implementation code.
 - Use `make test` to run the full suite.

@@ -9,12 +9,12 @@ use riffy::analysis::classify::EndpointClassifiers;
 use riffy::analysis::engine::DiffEngine;
 use riffy::analysis::suppress::SuppressRules;
 use riffy::config::{
-    EndpointConfig, Jaeger, Logging, Metrics, Pipeline, Proxy, Riffy, Server, Storage,
-    StorageBackend, Threshold, Upstream,
+    Consumer as ConsumerConfig, EndpointConfig, Jaeger, Logging, Metrics, Proxy, Riffy, Server,
+    Storage, StorageBackend, Threshold, Upstream,
 };
+use riffy::consumer::Consumer;
 use riffy::endpoint::EndpointMatcher;
 use riffy::http::router::{create_router, AppState};
-use riffy::pipeline::consumer::Consumer;
 use riffy::storage::{InMemorySampleStore, RawSample, SampleStore};
 use riffy::upstream::UpstreamClient;
 use serde_json::{json, Value};
@@ -38,7 +38,7 @@ fn test_config() -> Riffy {
         proxy: Proxy {
             allow_http_side_effects: false,
         },
-        pipeline: Pipeline {
+        consumer: ConsumerConfig {
             channel_capacity: 1024,
         },
         upstream: Upstream {
@@ -111,7 +111,7 @@ async fn spawn_proxy_with_config(
         Duration::from_secs(5),
     );
 
-    let (analysis_tx, analysis_rx) = riffy::pipeline::channel(1024);
+    let (analysis_tx, analysis_rx) = riffy::consumer::channel(1024);
     let store = Arc::new(InMemorySampleStore::new());
     let matcher = Arc::new(EndpointMatcher::new(
         &config

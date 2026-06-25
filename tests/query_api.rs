@@ -27,10 +27,13 @@ fn raw(
         timestamp: Utc::now(),
         baseline_status: 200,
         baseline_body: baseline.to_owned(),
+        baseline_headers: "{}".to_owned(),
         candidate_status: candidate.map(|_| 200),
         candidate_body: candidate.map(|b| b.to_owned()),
+        candidate_headers: candidate.map(|_| "{}".to_owned()),
         control_status: control.map(|_| 200),
         control_body: control.map(|b| b.to_owned()),
+        control_headers: control.map(|_| "{}".to_owned()),
         request_curl: None,
     }
 }
@@ -443,6 +446,8 @@ async fn get_sample_returns_full_request_and_responses() {
         Some(r#"{"a":1}"#),
     );
     s.request_curl = Some("curl -X GET '$RIFFY_TARGET/api/v1/users/7'".to_owned());
+    s.baseline_headers = r#"{"content-type":"application/json"}"#.to_owned();
+    s.candidate_headers = Some(r#"{"content-type":"application/json"}"#.to_owned());
     store.append_sample(&s).await.unwrap();
 
     let (addr, _) = spawn_admin(store).await;
@@ -473,6 +478,14 @@ async fn get_sample_returns_full_request_and_responses() {
     assert_eq!(body["baseline"]["body"]["a"], 1);
     assert_eq!(body["candidate"]["body"]["a"], 2);
     assert_eq!(body["control"]["body"]["a"], 1);
+    assert_eq!(
+        body["baseline"]["headers"]["content-type"],
+        "application/json"
+    );
+    assert_eq!(
+        body["candidate"]["headers"]["content-type"],
+        "application/json"
+    );
     assert!(body["request_curl"]
         .as_str()
         .unwrap()
@@ -486,6 +499,63 @@ async fn get_sample_returns_full_request_and_responses() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn header_diff_surfaces_under_headers_namespace_and_suppresses() {
+    let store = Arc::new(InMemorySampleStore::new());
+
+    // Bodies are identical; only the candidate's content-type header differs from
+    // baseline, while control matches baseline. The header diff must surface under
+    // the `:headers` namespace and read as a regression (raw > noise).
+    let body = r#"{"ok":true}"#;
+    for _ in 0..3 {
+        let mut s = raw("/api/v1/users/:id", body, Some(body), Some(body));
+        s.baseline_headers = r#"{"content-type":"application/json"}"#.to_owned();
+        s.candidate_headers = Some(r#"{"content-type":"text/html"}"#.to_owned());
+        s.control_headers = Some(r#"{"content-type":"application/json"}"#.to_owned());
+        store.append_sample(&s).await.unwrap();
+    }
+
+    let (addr, _) = spawn_admin(store).await;
+    let client = http_client();
+
+    let resp: Value = client
+        .get(format!("http://{addr}/diffs/paths"))
+        .query(&[("endpoint", "/api/v1/users/:id")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let paths = resp["paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0]["path"], ":headers.content-type");
+    assert_eq!(paths[0]["raw_count"], 3);
+    assert_eq!(paths[0]["noise_count"], 0);
+    assert_eq!(paths[0]["is_regression"], true);
+
+    // A `:headers` subtree rule hides every header path at once.
+    let resp = client
+        .put(format!("http://{addr}/suppress"))
+        .query(&[("endpoint", "/api/v1/users/:id")])
+        .json(&serde_json::json!({ "paths": [":headers"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp: Value = client
+        .get(format!("http://{addr}/diffs/paths"))
+        .query(&[("endpoint", "/api/v1/users/:id")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(resp["paths"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

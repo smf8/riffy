@@ -45,7 +45,7 @@ flowchart TD
         guard{"mutating method and<br/>allow-http-side-effects=false?"}
         sampledecide{"sample_rate gate:<br/>rand() &lt; sample_rate?<br/>(per-endpoint)"}
         fanout["tokio::join!<br/>CANDIDATE + CONTROL in parallel<br/>(src/upstream/client.rs)"]
-        send["try_send AnalysisMessage<br/>bounded mpsc, capacity = pipeline.channel-capacity<br/>(default 1024, R32); drop newest + warn when full (R12);<br/>carries an optional RequestSnapshot when the endpoint set<br/>capture_request_curl (R38)<br/>(src/pipeline/mod.rs)"]
+        send["try_send AnalysisMessage<br/>bounded mpsc, capacity = consumer.channel-capacity<br/>(default 1024, R32); drop newest + warn when full (R12);<br/>carries an optional RequestSnapshot when the endpoint set<br/>capture_request_curl (R38)<br/>(src/consumer/mod.rs)"]
         guard -- "yes" --> blocked(["mutating method —<br/>no fan-out; baseline already<br/>answered the client (R3)"])
         guard -- "no" --> sampledecide
         sampledecide -- "no" --> dropped(["not sampled —<br/>no fan-out, no sample"])
@@ -54,12 +54,12 @@ flowchart TD
 
     send --> recv
 
-    subgraph consumer ["Sample consumer — single task (src/pipeline/consumer.rs)"]
+    subgraph consumer ["Sample consumer — single task; handle = resolve → assemble → store (src/consumer/mod.rs, sample.rs)"]
         recv["recv AnalysisMessage"]
         resolve["EndpointMatcher.resolve → Option<br/>matchit radix tree (R40); :param segment match,<br/>most specific template wins, slashes normalized, query stripped;<br/>unregistered path → drop, not stored (R35)<br/>(src/endpoint/mod.rs)"]
-        baselinebody["decode + validate baseline body:<br/>decode_body — gzip / x-gzip / deflate(zlib) / br / zstd<br/>via async-compression (R20); must be JSON within<br/>storage.max-body-bytes (R44), else skip the whole sample<br/>(src/pipeline/decode.rs, consumer.rs)"]
-        otherbodies["per candidate/control:<br/>failed call → status None; divergent status → status only, no body;<br/>same status → store JSON body, but DISCARD the whole sample<br/>if that body is non-JSON or over max-body-bytes, so it never<br/>scores as a false 'no difference' (R41)"]
-        curl["render request_curl from the snapshot<br/>($RIFFY_TARGET placeholder host, R38)<br/>(src/pipeline/curl.rs)"]
+        baselinebody["decode + validate baseline body:<br/>decode_body — gzip / x-gzip / deflate(zlib) / br / zstd<br/>via async-compression (R20); must be JSON within<br/>storage.max-body-bytes (R44), else skip the whole sample;<br/>response headers normalized to a JSON object, dropping<br/>volatile/sensitive ones (R46)<br/>(src/upstream/body.rs, header.rs; src/consumer/sample.rs)"]
+        otherbodies["per candidate/control:<br/>failed call → status None; divergent status → status only, no body/headers;<br/>same status → store JSON body + normalized headers, but DISCARD the<br/>whole sample if that body is non-JSON or over max-body-bytes, so it<br/>never scores as a false 'no difference' (R41/R46)"]
+        curl["render request_curl from the snapshot<br/>($RIFFY_TARGET placeholder host, R38)<br/>(src/consumer/curl.rs)"]
         append["SampleStore.append_sample(RawSample)<br/>(src/storage/, R43)"]
         recv --> resolve --> baselinebody --> otherbodies --> curl --> append
     end
@@ -120,8 +120,11 @@ flowchart LR
 
 For each sample the engine reproduces the status-before-body rule (R23): a
 candidate/control whose status differs from baseline is reported as a `:status`
-divergence (`STATUS_FIELD`, R36) and its body is never compared; a same-status
-upstream is diffed via `flatten_value` (`src/compare/`) into dot-paths
+divergence (`STATUS_FIELD`, R36) and its body/headers are never compared; a
+same-status upstream is diffed via `flatten_value` (`src/compare/`) into dot-paths
+for both the body and its normalized headers — header paths carry the reserved
+`:headers` prefix (`HEADER_FIELD_PREFIX`, R46) so they never collide with body
+fields and a single `:headers` subtree rule suppresses them all
 (raw = baseline vs candidate, noise = baseline vs control); a failed upstream
 (status `None`) contributes nothing. Suppression is applied **while** computing
 each diff — `diffs.retain(|path| !rules.is_suppressed(endpoint, path))` — so a
@@ -149,7 +152,7 @@ failing-endpoints overview count.
 | `GET /diffs/paths` | `{ "endpoints": [ { endpoint, total, regressions, paths[], last_updated } ] }`, sorted by endpoint; `regressions` = count of regressing field paths; `paths[]` are `PathSummary { path, raw_count, noise_count, is_regression }` (R44) |
 | `GET /diffs/paths?endpoint=<ep>[&exclude=a,b]` | one `{ endpoint, total, regressions, paths[], last_updated }`; `exclude` previews the result with those extra prefixes ignored (not persisted, R44); 404 if the endpoint has no samples |
 | `GET /diffs/detail?endpoint=&path=[&exclude=a,b]` | `{ endpoint, path, total, raw_count, noise_count, is_regression, relative_difference, absolute_difference, last_updated, samples }` — all derived from the raw samples at read time; `samples = { items[], limit, offset, has_more }`, newest-first, each item carrying its store `id`; `exclude` previews extra exclusions (R44); 404 if the endpoint has no samples, or if the path never diffs at offset 0. `limit` default 20 / max 100 |
-| `GET /diffs/sample?endpoint=&id=` | one stored sample: `{ id, endpoint, timestamp, request_curl, baseline/candidate/control: { status?, body? } }` (bodies parsed back to JSON) for the inspect modal; `404` if absent (R45) |
+| `GET /diffs/sample?endpoint=&id=` | one stored sample: `{ id, endpoint, timestamp, request_curl, baseline/candidate/control: { status?, body?, headers? } }` (bodies and headers parsed back to JSON) for the inspect modal; `404` if absent (R45/R46) |
 | `DELETE /diffs?endpoint=<ep>` | drops the endpoint's stored samples (stream + index); `204` on success, `404` if the endpoint has no samples (R43) |
 | `GET /suppress[?endpoint=]` | `{ endpoint, paths[] }` for one endpoint, or `{ "rules": { endpoint: paths[] } }` for all (R42) |
 | `PUT /suppress?endpoint=` | body `{ "paths": [...] }` (subtree / `*` glob / `re:` regex); replaces that endpoint's rules and returns `{ endpoint, paths }`; effective on the next query; `400` on an invalid regex (R42/R44) |
@@ -171,8 +174,8 @@ installs the global recorder.
 | `riffy_proxy_request_total` | method, endpoint, status (HTTP code or `cancelled`) | `src/http/metrics.rs`, via the `track_proxy` middleware |
 | `riffy_proxy_request_duration_seconds` | method, endpoint | `src/http/metrics.rs`, via the `track_proxy` middleware |
 | `riffy_upstream_request_duration_seconds` | upstream (baseline/candidate/control), endpoint, outcome (`ok`/`error`/`cancelled`) | `src/upstream/metrics.rs`, started in `forward` + its background task |
-| `riffy_sample_store_lag_seconds` | — | `src/pipeline/metrics.rs`, called by the consumer after a sample is stored |
-| `riffy_samples_stored_total` | endpoint | `src/pipeline/metrics.rs`, called by the consumer after a sample is stored |
+| `riffy_sample_store_lag_seconds` | — | `src/consumer/metrics.rs`, called by the consumer after a sample is stored |
+| `riffy_samples_stored_total` | endpoint | `src/consumer/metrics.rs`, called by the consumer after a sample is stored |
 
 See `docs/metrics.md` for the Grafana/PromQL panel reference and the configured
 histogram buckets.
@@ -209,8 +212,10 @@ the read API (`RawSample.id`); `GET /diffs/sample` resolves it with `XRANGE id i
 | `timestamp` | RFC 3339; read-time queries ignore samples older than `storage.window` |
 | `baseline_status` | always present |
 | `baseline_body` | decoded baseline JSON text; a non-JSON or over-`max-body-bytes` baseline means **no sample is stored** (R44) |
+| `baseline_headers` | baseline response headers as a normalized JSON object (`upstream::header::headers_to_json`): lowercased names, single value→string / repeated→array, hop-by-hop and volatile/sensitive (`date`, `content-length`, `content-encoding`, `set-cookie`) dropped (R46) |
 | `candidate_status` / `control_status` | omitted when that upstream failed |
 | `candidate_body` / `control_body` | decoded JSON text, present **only** when that upstream answered baseline's status with a JSON body within `max-body-bytes` (R41) |
+| `candidate_headers` / `control_headers` | normalized JSON headers, present on the **same condition** as that upstream's body, so a stored body always carries its headers (R46) |
 | `request_curl` | replayable curl for the originating request with a `$RIFFY_TARGET` placeholder host; present only when the endpoint set `capture_request_curl`. Credential header values (`authorization`, `cookie`, …) are redacted unless `store_credentials_header`; `host`/`content-length`/hop-by-hop are dropped; bodies are inlined up to 64 KiB, else omitted with a comment; all values are POSIX shell-quoted via `shell-escape` (R38) |
 
 There are **no aggregation buckets** (the previous `riffy:agg:*` hashes,
@@ -219,7 +224,8 @@ There are **no aggregation buckets** (the previous `riffy:agg:*` hashes,
 `status_mismatch`) and `is_regression`/percentages are computed at read time from
 the raw samples, never stored. `diff_type` is defined in
 `src/compare/flatten.rs`; a `status_mismatch` rides the reserved `:status` field
-path (R36).
+path (R36), and response-header diffs ride the reserved `:headers` prefix
+(`HEADER_FIELD_PREFIX`, R46).
 
 ## Invariants (do not regress)
 
@@ -243,7 +249,9 @@ path (R36).
    skips the sample entirely; likewise a candidate or control that answered
    baseline's status but returned a non-JSON or over-cap body discards the whole
    sample, so it can never score as a false "no difference". A divergent status
-   stores the status without a body.
+   stores the status without a body or headers. Normalized response headers are
+   stored alongside the body on the same condition and diffed at read time under
+   the `:headers` namespace (R46).
 5. **Suppression is applied during the diff and is runtime-writable (R42):** the
    `DiffEngine` holds rules in an `ArcSwap<SuppressRules>`, seeded from config and
    replaced wholesale by `/suppress`; a suppressed path is never counted or shown,

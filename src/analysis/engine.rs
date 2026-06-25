@@ -8,20 +8,16 @@ use serde_json::{json, Value};
 
 use super::classify::{EndpointClassifiers, FieldCounts};
 use super::suppress::SuppressRules;
-use crate::compare::flatten::{flatten_value, DiffType, FieldDiff, STATUS_FIELD};
+use crate::compare::flatten::{
+    flatten_value, DiffType, FieldDiff, HEADER_FIELD_PREFIX, STATUS_FIELD,
+};
 use crate::storage::RawSample;
 
-/// Read-time analysis: turns stored raw samples into diffs, applies the
-/// suppression rules it owns *during* diffing, aggregates counts, and runs the
-/// regression verdict. The producer records raw samples only — none of this runs
-/// on the write side. The suppression rules are swapped atomically, so a runtime
-/// edit takes effect on the next query with no restart.
 pub struct DiffEngine {
     suppress: ArcSwap<SuppressRules>,
     classifiers: EndpointClassifiers,
 }
 
-/// Per-endpoint diff tallies summed across the windowed samples.
 #[derive(Debug, Clone)]
 pub struct EndpointCounts {
     pub endpoint: String,
@@ -32,7 +28,6 @@ pub struct EndpointCounts {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiffSample {
-    /// Store id, so the UI can fetch the full request/response via `/diffs/sample`.
     pub id: String,
     pub timestamp: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,7 +43,6 @@ pub struct SamplePage {
     pub items: Vec<DiffSample>,
     pub limit: usize,
     pub offset: usize,
-    /// `true` when at least one older matching sample exists beyond this page.
     pub has_more: bool,
 }
 
@@ -78,9 +72,6 @@ impl DiffEngine {
         self.suppress.load_full()
     }
 
-    /// Replace one endpoint's suppression rules (empty list clears it). Rejects an
-    /// invalid `re:` regex. Takes effect on the next query; `rcu` makes concurrent
-    /// edits safe.
     pub fn set_suppress(&self, endpoint: &str, paths: Vec<String>) -> Result<(), regex::Error> {
         // Validate up front so a bad regex is rejected before any swap.
         SuppressRules::compile(&paths)?;
@@ -94,8 +85,6 @@ impl DiffEngine {
         Ok(())
     }
 
-    /// Whether a field path is a regression for this endpoint (classifier verdict,
-    /// with the `:status` raw>noise special case).
     pub fn is_regression(
         &self,
         endpoint: &str,
@@ -104,9 +93,8 @@ impl DiffEngine {
         total: u64,
     ) -> bool {
         if path == STATUS_FIELD {
-            // A status divergence is categorically a regression when the candidate
-            // diverges more than the control — independent of percentage thresholds,
-            // which would dilute a rare but critical status difference.
+            // Status divergence is categorically a regression when candidate
+            // diverges more than control, regardless of percentage thresholds.
             counts.raw_count > counts.noise_count
         } else {
             self.classifiers
@@ -115,8 +103,6 @@ impl DiffEngine {
         }
     }
 
-    /// The regressing field paths for an aggregated endpoint, sorted. Powers the
-    /// failing-endpoints overview and the per-field regression marks.
     pub fn regressions(&self, counts: &EndpointCounts) -> Vec<String> {
         let mut out: Vec<String> = counts
             .fields
@@ -128,9 +114,6 @@ impl DiffEngine {
         out
     }
 
-    /// Sum per-field raw/noise diff counts across the windowed samples, applying
-    /// `extra` exclusions on top of the stored rules (used for the non-persisted
-    /// preview). `None` when there are no samples for the endpoint.
     pub fn aggregate(
         &self,
         endpoint: &str,
@@ -166,9 +149,6 @@ impl DiffEngine {
         })
     }
 
-    /// Counts and a paginated, newest-first list of per-sample diffs for one
-    /// field path. `samples` must be newest-first. `extra` applies non-persisted
-    /// exclusions on top of the stored rules.
     pub fn detail(
         &self,
         endpoint: &str,
@@ -183,8 +163,7 @@ impl DiffEngine {
         let last_updated = samples.first().map(|s| s.timestamp);
 
         let mut counts = FieldCounts::default();
-        // Collect one past the page so `has_more` is known without a second pass;
-        // counts still scan every sample.
+        // Fetch one past the page to learn `has_more` without a second pass.
         let want = offset.saturating_add(limit).saturating_add(1);
         let mut matches: Vec<DiffSample> = Vec::new();
 
@@ -234,71 +213,90 @@ impl DiffEngine {
     }
 }
 
-/// Reproduces the former consumer-side `diff_against` logic for one sample, with
-/// suppression applied inline. Returns `(raw = baseline vs candidate, noise =
-/// baseline vs control)`.
+struct Baseline<'a> {
+    body: &'a Value,
+    headers: &'a Value,
+    status: u16,
+}
+
+struct Other<'a> {
+    status: Option<u16>,
+    body: Option<&'a str>,
+    headers: Option<&'a str>,
+}
+
 fn diff_sample(
     endpoint: &str,
     sample: &RawSample,
     rules: &SuppressRules,
     extra: &SuppressRules,
 ) -> (HashMap<String, FieldDiff>, HashMap<String, FieldDiff>) {
-    let baseline: Value = match serde_json::from_str(&sample.baseline_body) {
+    let baseline_body: Value = match serde_json::from_str(&sample.baseline_body) {
         Ok(v) => v,
-        // baseline_body is validated as JSON at write time; treat a corrupt body
-        // defensively as "no diffs" rather than panicking a read.
+        // Bodies are JSON-validated at write time; degrade a corrupt read to "no diffs".
         Err(_) => return (HashMap::new(), HashMap::new()),
+    };
+    // A corrupt or pre-headers value yields no header diffs rather than failing the read.
+    let baseline_headers: Value =
+        serde_json::from_str(&sample.baseline_headers).unwrap_or_else(|_| json!({}));
+    let baseline = Baseline {
+        body: &baseline_body,
+        headers: &baseline_headers,
+        status: sample.baseline_status,
     };
 
     let raw = diff_one(
         endpoint,
         &baseline,
-        sample.baseline_status,
-        sample.candidate_status,
-        sample.candidate_body.as_deref(),
+        &Other {
+            status: sample.candidate_status,
+            body: sample.candidate_body.as_deref(),
+            headers: sample.candidate_headers.as_deref(),
+        },
         rules,
         extra,
     );
     let noise = diff_one(
         endpoint,
         &baseline,
-        sample.baseline_status,
-        sample.control_status,
-        sample.control_body.as_deref(),
+        &Other {
+            status: sample.control_status,
+            body: sample.control_body.as_deref(),
+            headers: sample.control_headers.as_deref(),
+        },
         rules,
         extra,
     );
     (raw, noise)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn diff_one(
     endpoint: &str,
-    baseline: &Value,
-    baseline_status: u16,
-    other_status: Option<u16>,
-    other_body: Option<&str>,
+    baseline: &Baseline,
+    other: &Other,
     rules: &SuppressRules,
     extra: &SuppressRules,
 ) -> HashMap<String, FieldDiff> {
-    let mut diffs = match other_status {
-        // Upstream failed: contributes nothing.
+    let mut diffs = match other.status {
         None => HashMap::new(),
-        // Same status: compare bodies. A missing/unparseable body yields no diffs.
-        Some(status) if status == baseline_status => {
-            match other_body.and_then(|b| serde_json::from_str::<Value>(b).ok()) {
-                Some(other) => flatten_value(baseline, &other),
+        Some(status) if status == baseline.status => {
+            let mut diffs = match other.body.and_then(parse_json) {
+                Some(other_body) => flatten_value(baseline.body, &other_body),
                 None => HashMap::new(),
+            };
+            if let Some(other_headers) = other.headers.and_then(parse_json) {
+                for (path, diff) in flatten_value(baseline.headers, &other_headers) {
+                    diffs.insert(format!("{HEADER_FIELD_PREFIX}.{path}"), diff);
+                }
             }
+            diffs
         }
-        // Status divergence: the difference itself is the signal, recorded as a
-        // pseudo-field so it counts and queries like any diff; body not compared.
         Some(status) => {
             let mut m = HashMap::new();
             m.insert(
                 STATUS_FIELD.to_owned(),
                 FieldDiff {
-                    left: Some(json!(baseline_status)),
+                    left: Some(json!(baseline.status)),
                     right: Some(json!(status)),
                     diff_type: DiffType::StatusMismatch,
                 },
@@ -307,10 +305,12 @@ fn diff_one(
         }
     };
 
-    // Apply suppression directly while computing the diff: stored rules plus the
-    // ad-hoc preview exclusions.
     diffs.retain(|path, _| {
         !rules.is_suppressed(endpoint, path) && !extra.is_suppressed(endpoint, path)
     });
     diffs
+}
+
+fn parse_json(text: &str) -> Option<Value> {
+    serde_json::from_str(text).ok()
 }

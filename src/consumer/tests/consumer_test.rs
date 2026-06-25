@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
+use crate::consumer::{AnalysisMessage, Consumer, RequestSnapshot};
 use crate::endpoint::EndpointMatcher;
-use crate::pipeline::consumer::Consumer;
-use crate::pipeline::{AnalysisMessage, RequestSnapshot};
 use crate::storage::{InMemorySampleStore, RawSample, SampleStore};
 use crate::upstream::client::UpstreamResponse;
-use axum::http::{HeaderMap, Method};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use bytes::Bytes;
 
 const EP: &str = "/api/v1/users/:id";
@@ -15,6 +14,21 @@ fn response(status: u16, body: &str) -> UpstreamResponse {
     UpstreamResponse {
         status,
         headers: HeaderMap::new(),
+        body: Bytes::copy_from_slice(body.as_bytes()),
+    }
+}
+
+fn response_with_headers(status: u16, body: &str, headers: &[(&str, &str)]) -> UpstreamResponse {
+    let mut map = HeaderMap::new();
+    for (name, value) in headers {
+        map.append(
+            HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        );
+    }
+    UpstreamResponse {
+        status,
+        headers: map,
         body: Bytes::copy_from_slice(body.as_bytes()),
     }
 }
@@ -43,7 +57,7 @@ async fn run_consumer_with_cap(
     messages: Vec<AnalysisMessage>,
     max_body_bytes: usize,
 ) -> Arc<InMemorySampleStore> {
-    let (tx, rx) = crate::pipeline::channel(1024);
+    let (tx, rx) = crate::consumer::channel(1024);
     let store = Arc::new(InMemorySampleStore::new());
     let matcher = Arc::new(EndpointMatcher::new(&[EP.to_owned()]));
 
@@ -86,7 +100,6 @@ async fn stores_sample_with_both_bodies_for_matching_status() {
 
 #[tokio::test]
 async fn identical_responses_still_store_a_sample() {
-    // Producer records raw data unconditionally; "no diff" is decided at read time.
     let body = r#"{"a": 1}"#;
     let store = run_consumer(vec![message(
         "/api/v1/users/1",
@@ -107,15 +120,12 @@ async fn status_mismatch_stores_status_without_body() {
     let store = run_consumer(vec![msg]).await;
     let samples = stored(&store).await;
     assert_eq!(samples.len(), 1);
-    // Body is not stored for a divergent status — it is never compared at read time.
     assert_eq!(samples[0].candidate_status, Some(500));
     assert_eq!(samples[0].candidate_body, None);
 }
 
 #[tokio::test]
 async fn same_status_invalid_candidate_json_discards_sample() {
-    // Candidate answered baseline's status but with a non-JSON body: storing it as
-    // a bodyless match would hide a real body regression, so the sample is dropped.
     let store = run_consumer(vec![message(
         "/api/v1/users/1",
         r#"{"a": 1}"#,
@@ -161,9 +171,7 @@ async fn non_json_baseline_is_skipped_entirely() {
 
 #[tokio::test]
 async fn oversized_baseline_and_oversized_same_status_candidate_are_skipped() {
-    // Cap below the candidate body but above the baseline. The candidate answered
-    // baseline's status, so its over-cap body cannot be stored for comparison and
-    // the whole sample is discarded rather than scored as a bodyless match.
+    // Cap sits between the baseline and the larger same-status candidate body.
     let store = run_consumer_with_cap(
         vec![message(
             "/api/v1/users/1",
@@ -176,7 +184,6 @@ async fn oversized_baseline_and_oversized_same_status_candidate_are_skipped() {
     .await;
     assert!(stored(&store).await.is_empty());
 
-    // Now a baseline over the cap skips the whole sample.
     let store = run_consumer_with_cap(
         vec![message(
             "/api/v1/users/1",
@@ -276,4 +283,37 @@ async fn no_snapshot_means_no_curl() {
     let samples = stored(&store).await;
     assert_eq!(samples.len(), 1);
     assert!(samples[0].request_curl.is_none());
+}
+
+#[tokio::test]
+async fn response_headers_are_captured_and_volatile_dropped() {
+    let mut msg = message("/api/v1/users/1", r#"{"a": 1}"#, None, None);
+    msg.baseline_response = response_with_headers(
+        200,
+        r#"{"a": 1}"#,
+        &[
+            ("content-type", "application/json"),
+            ("date", "Wed, 25 Jun 2026 00:00:00 GMT"),
+            ("set-cookie", "session=secret"),
+        ],
+    );
+    msg.candidate_response = Some(response_with_headers(
+        200,
+        r#"{"a": 1}"#,
+        &[("content-type", "text/html")],
+    ));
+
+    let store = run_consumer(vec![msg]).await;
+    let samples = stored(&store).await;
+    assert_eq!(samples.len(), 1);
+    let s = &samples[0];
+
+    let baseline_headers: serde_json::Value = serde_json::from_str(&s.baseline_headers).unwrap();
+    assert_eq!(baseline_headers["content-type"], "application/json");
+    assert!(baseline_headers.get("date").is_none());
+    assert!(baseline_headers.get("set-cookie").is_none());
+
+    let candidate_headers: serde_json::Value =
+        serde_json::from_str(s.candidate_headers.as_ref().unwrap()).unwrap();
+    assert_eq!(candidate_headers["content-type"], "text/html");
 }

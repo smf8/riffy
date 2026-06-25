@@ -9,9 +9,6 @@ use opentelemetry_sdk::Resource;
 
 pub mod timer;
 
-/// Seconds-scale buckets shared by all duration histograms (proxy request,
-/// upstream call, sample-store lag), spanning sub-millisecond in-cluster calls up
-/// to the upstream timeout ceiling.
 const LATENCY_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
 ];

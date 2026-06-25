@@ -7,7 +7,7 @@
 proxy:
   allow_http_side_effects: false
 
-pipeline:
+consumer:
   channel_capacity: 1024
 
 upstream:

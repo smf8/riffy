@@ -17,7 +17,7 @@ impl<F: Fn(&str, Duration)> GuardedTimer<F> {
         }
     }
 
-    /// Consume the timer so the `Drop` path cannot also fire.
+    // Consume the timer so the `Drop` path cannot also fire.
     pub fn finish(mut self, outcome: &str) {
         self.finished = true;
         (self.record)(outcome, self.started.elapsed());

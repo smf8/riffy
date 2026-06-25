@@ -19,9 +19,6 @@ const MAX_SAMPLE_LIMIT: usize = 100;
 // Cap on `offset` to prevent unbounded scans from pathological values.
 const MAX_SAMPLE_OFFSET: usize = 100_000;
 
-/// Parse a comma-separated `exclude` param into ad-hoc suppression rules for the
-/// preview ("re-check with noise excluded"), without persisting them. Invalid
-/// regex → 400.
 fn exclude_rules(endpoint: &str, exclude: Option<&str>) -> Result<SuppressRules, AppError> {
     let patterns: Vec<String> = exclude
         .map(|s| {
@@ -78,8 +75,6 @@ fn endpoint_paths(engine: &DiffEngine, counts: EndpointCounts) -> EndpointPaths 
 #[derive(Debug, Deserialize)]
 pub struct PathsQuery {
     pub endpoint: Option<String>,
-    /// Comma-separated ad-hoc exclusions (preview only). Honored on the
-    /// single-endpoint form.
     pub exclude: Option<String>,
 }
 
@@ -179,19 +174,20 @@ struct UpstreamResponseView {
     status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headers: Option<Value>,
 }
 
 impl UpstreamResponseView {
-    fn new(status: Option<u16>, body: Option<&str>) -> Self {
+    fn new(status: Option<u16>, body: Option<&str>, headers: Option<&str>) -> Self {
         Self {
             status,
             body: body.map(parse_body),
+            headers: headers.map(parse_body),
         }
     }
 }
 
-/// Stored bodies are decoded JSON text; parse them back so the modal renders
-/// structured JSON, falling back to a string if somehow not parseable.
 fn parse_body(text: &str) -> Value {
     serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_owned()))
 }
@@ -221,14 +217,17 @@ fn sample_view(sample: &RawSample) -> Value {
         "baseline": UpstreamResponseView::new(
             Some(sample.baseline_status),
             Some(&sample.baseline_body),
+            Some(&sample.baseline_headers),
         ),
         "candidate": UpstreamResponseView::new(
             sample.candidate_status,
             sample.candidate_body.as_deref(),
+            sample.candidate_headers.as_deref(),
         ),
         "control": UpstreamResponseView::new(
             sample.control_status,
             sample.control_body.as_deref(),
+            sample.control_headers.as_deref(),
         ),
     })
 }

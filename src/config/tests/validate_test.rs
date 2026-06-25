@@ -6,7 +6,7 @@ fn valid_config() -> Riffy {
         proxy: Proxy {
             allow_http_side_effects: false,
         },
-        pipeline: Pipeline {
+        consumer: Consumer {
             channel_capacity: 1024,
         },
         upstream: Upstream {
@@ -101,7 +101,7 @@ fn in_memory_backend_is_valid() {
 #[test]
 fn zero_channel_capacity_fails() {
     let mut cfg = valid_config();
-    cfg.pipeline.channel_capacity = 0;
+    cfg.consumer.channel_capacity = 0;
     assert!(cfg.validate().is_err());
 }
 

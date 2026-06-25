@@ -8,12 +8,12 @@ use riffy::analysis::classify::EndpointClassifiers;
 use riffy::analysis::engine::DiffEngine;
 use riffy::analysis::suppress::SuppressRules;
 use riffy::config::{CliOverrides, StorageBackend};
+use riffy::consumer::Consumer;
 use riffy::endpoint::EndpointMatcher;
 use riffy::http::router::{admin_router, create_router, AdminState, AppState};
-use riffy::pipeline::consumer::Consumer;
 use riffy::storage::{InMemorySampleStore, RedisSampleStore, SampleStore};
 use riffy::upstream::UpstreamClient;
-use riffy::{config, pipeline, telemetry};
+use riffy::{config, consumer, telemetry};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.upstream.timeout,
     );
 
-    let (analysis_tx, analysis_rx) = pipeline::channel(cfg.pipeline.channel_capacity);
+    let (analysis_tx, analysis_rx) = consumer::channel(cfg.consumer.channel_capacity);
 
     let patterns: Vec<String> = cfg.endpoints.iter().map(|e| e.pattern.clone()).collect();
     let matcher = Arc::new(EndpointMatcher::new(&patterns));

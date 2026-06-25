@@ -1,14 +1,7 @@
-//! Verifies the config-rs wiring: the embedded `default.yaml` base layer,
-//! deep-merge of partial overrides, serde kebab-case renames, `humantime`
-//! durations, per-endpoint thresholds, and the internally tagged storage
-//! backend enum.
-
 use crate::config::{apply_cli_overrides, CliOverrides, Riffy, StorageBackend, DEFAULT_CONFIG};
 use config::{Config, File, FileFormat};
 use std::time::Duration;
 
-/// Only the fields with no built-in default; everything else comes from the
-/// embedded `default.yaml`.
 const MINIMAL_YAML: &str = r#"
 upstream:
   baseline: "http://localhost:9100"
@@ -18,7 +11,6 @@ endpoints:
   - pattern: "/api/v1/users/:id"
 "#;
 
-/// Mirror `config::load`'s layering: embedded defaults, then the user source.
 fn parse(yaml: &str) -> Riffy {
     Config::builder()
         .add_source(File::from_str(DEFAULT_CONFIG, FileFormat::Yaml))
@@ -36,7 +28,7 @@ fn embedded_defaults_fill_omitted_sections() {
     // All of these come from the embedded default.yaml, not the user config.
     assert_eq!(cfg.server.proxy_port, 7677);
     assert_eq!(cfg.server.admin_port, 7678);
-    assert_eq!(cfg.pipeline.channel_capacity, 1024);
+    assert_eq!(cfg.consumer.channel_capacity, 1024);
     assert_eq!(cfg.storage.sample_cap, 10_000);
     assert_eq!(cfg.storage.window, Duration::from_secs(3600));
     assert_eq!(cfg.storage.max_body_bytes, 262_144);

@@ -7,8 +7,7 @@ use redis::aio::ConnectionManager;
 use redis::streams::{StreamId, StreamMaxlen, StreamRangeReply};
 use redis::{from_redis_value, AsyncCommands, Value};
 
-/// Redis set tracking every endpoint with a sample stream, so `list_endpoints`
-/// can enumerate them without scanning the keyspace.
+// Tracks endpoints that have a stream, so `list_endpoints` avoids a keyspace scan.
 const ENDPOINTS_INDEX: &str = "riffy:samples:__endpoints__";
 
 fn stream_key(endpoint: &str) -> String {
@@ -17,7 +16,6 @@ fn stream_key(endpoint: &str) -> String {
 
 pub struct RedisSampleStore {
     conn: ConnectionManager,
-    /// Approximate cap on each endpoint's stream length (`XADD MAXLEN ~`).
     sample_cap: usize,
     window_secs: u64,
 }
@@ -48,6 +46,7 @@ impl SampleStore for RedisSampleStore {
             ("timestamp", sample.timestamp.to_rfc3339()),
             ("baseline_status", sample.baseline_status.to_string()),
             ("baseline_body", sample.baseline_body.clone()),
+            ("baseline_headers", sample.baseline_headers.clone()),
         ];
         if let Some(status) = sample.candidate_status {
             fields.push(("candidate_status", status.to_string()));
@@ -55,20 +54,25 @@ impl SampleStore for RedisSampleStore {
         if let Some(body) = &sample.candidate_body {
             fields.push(("candidate_body", body.clone()));
         }
+        if let Some(headers) = &sample.candidate_headers {
+            fields.push(("candidate_headers", headers.clone()));
+        }
         if let Some(status) = sample.control_status {
             fields.push(("control_status", status.to_string()));
         }
         if let Some(body) = &sample.control_body {
             fields.push(("control_body", body.clone()));
         }
+        if let Some(headers) = &sample.control_headers {
+            fields.push(("control_headers", headers.clone()));
+        }
         if let Some(curl) = &sample.request_curl {
             fields.push(("request_curl", curl.clone()));
         }
 
         let key = stream_key(&sample.endpoint);
-        // Approximate trimming (`~`) lets Redis trim whole macro-nodes, far cheaper
-        // than exact trimming on every append. EXPIRE ages out idle endpoints whose
-        // samples have all fallen out of the window.
+        // `~` trims whole macro-nodes (far cheaper than exact); EXPIRE ages out
+        // endpoints whose samples have all left the window.
         let mut pipe = redis::pipe();
         pipe.xadd_maxlen(&key, StreamMaxlen::Approx(self.sample_cap), "*", &fields)
             .ignore();
@@ -156,6 +160,9 @@ fn sample_from_entry(entry: &StreamId, endpoint: &str) -> Result<RawSample, Stor
         })?;
     let baseline_body = stream_field(&entry.map, "baseline_body")?
         .ok_or_else(|| StoreError::Corrupt(format!("sample {} missing baseline_body", entry.id)))?;
+    // Pre-headers samples lack baseline_headers; default to {} so they stay readable.
+    let baseline_headers =
+        stream_field(&entry.map, "baseline_headers")?.unwrap_or_else(|| "{}".to_owned());
 
     Ok(RawSample {
         id: entry.id.clone(),
@@ -163,10 +170,13 @@ fn sample_from_entry(entry: &StreamId, endpoint: &str) -> Result<RawSample, Stor
         timestamp,
         baseline_status,
         baseline_body,
+        baseline_headers,
         candidate_status: parse_status(&entry.map, "candidate_status", &entry.id)?,
         candidate_body: stream_field(&entry.map, "candidate_body")?,
+        candidate_headers: stream_field(&entry.map, "candidate_headers")?,
         control_status: parse_status(&entry.map, "control_status", &entry.id)?,
         control_body: stream_field(&entry.map, "control_body")?,
+        control_headers: stream_field(&entry.map, "control_headers")?,
         request_curl: stream_field(&entry.map, "request_curl")?,
     })
 }

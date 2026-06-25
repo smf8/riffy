@@ -160,7 +160,7 @@ riffy:
     redisUri: "redis://riffy-redis:6379"
     aggregationInterval: 1s
     streamCap: 10000
-  pipeline: { channelCapacity: 1024 }
+  consumer: { channelCapacity: 1024 }
   logging:
     level: info
     otlp: { enabled: false, endpoint: "http://jaeger-collector:4318" }

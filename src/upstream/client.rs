@@ -1,4 +1,5 @@
 use super::error::UpstreamError;
+use super::header::is_hop_by_hop;
 use axum::http::{HeaderMap, Method};
 use bytes::Bytes;
 use reqwest::Client;
@@ -18,15 +19,6 @@ pub struct UpstreamClient {
     pub candidate: String,
     pub timeout: Duration,
 }
-
-/// RFC 2616 §13.5.1 hop-by-hop headers — must not be forwarded by proxies.
-const HOP_BY_HOP_HEADERS: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "transfer-encoding",
-    "te",
-    "upgrade",
-];
 
 impl UpstreamClient {
     pub fn new(baseline: String, control: String, candidate: String, timeout: Duration) -> Self {
@@ -68,7 +60,7 @@ impl UpstreamClient {
         let mut builder = self.client.request(method.clone(), &url);
 
         for (name, value) in headers.iter() {
-            if HOP_BY_HOP_HEADERS.contains(&name.as_str()) {
+            if is_hop_by_hop(name.as_str()) {
                 continue;
             }
             builder = builder.header(name, value);
@@ -87,12 +79,9 @@ impl UpstreamClient {
         let status = resp.status().as_u16();
         let mut resp_headers = HeaderMap::new();
         for (name, value) in resp.headers().iter() {
-            // Strip transfer-encoding only: we buffer the body, so content-length still matches.
-            if name.as_str() == "transfer-encoding" {
-                continue;
-            }
-
-            if HOP_BY_HOP_HEADERS.contains(&name.as_str()) {
+            // Hop-by-hop headers include transfer-encoding: the body is buffered, so
+            // dropping it keeps the relayed content-length authoritative.
+            if is_hop_by_hop(name.as_str()) {
                 continue;
             }
 
