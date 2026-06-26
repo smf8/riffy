@@ -13,6 +13,7 @@ use crate::analysis::engine::{DiffEngine, EndpointCounts};
 use crate::analysis::suppress::SuppressRules;
 use crate::error::AppError;
 use crate::storage::{RawSample, SampleStore};
+use crate::upstream::normalize_base;
 
 const DEFAULT_SAMPLE_LIMIT: usize = 20;
 const MAX_SAMPLE_LIMIT: usize = 100;
@@ -147,12 +148,7 @@ pub async fn diff_detail(
         offset,
     );
 
-    if detail.raw_count == 0
-        && detail.noise_count == 0
-        && detail.samples.items.is_empty()
-        && !detail.samples.has_more
-        && offset == 0
-    {
+    if detail.is_empty_at_first_page() {
         return Err(AppError::NotFound(format!(
             "no diffs recorded for endpoint '{}' path '{}'",
             query.endpoint, query.path
@@ -246,14 +242,6 @@ impl UpstreamTargets {
             candidate: normalize_base(candidate),
             control: normalize_base(control),
         }
-    }
-}
-
-fn normalize_base(addr: &str) -> String {
-    if addr.contains("://") {
-        addr.to_owned()
-    } else {
-        format!("http://{addr}")
     }
 }
 

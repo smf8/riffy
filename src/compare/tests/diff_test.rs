@@ -1,4 +1,5 @@
-use crate::compare::{diff, Difference};
+use crate::compare::diff::diff;
+use crate::compare::Difference;
 use serde_json::json;
 
 #[test]

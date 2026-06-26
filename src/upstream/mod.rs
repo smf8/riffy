@@ -8,3 +8,11 @@ pub mod metrics;
 mod tests;
 
 pub use client::UpstreamClient;
+
+pub fn normalize_base(addr: &str) -> String {
+    if addr.contains("://") {
+        addr.to_owned()
+    } else {
+        format!("http://{addr}")
+    }
+}

@@ -2,14 +2,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 mod diff;
-pub mod error;
 pub mod flatten;
 
 #[cfg(test)]
 mod tests;
-
-#[allow(unused_imports)]
-pub use diff::diff;
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone)]

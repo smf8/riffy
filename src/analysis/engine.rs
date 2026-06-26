@@ -60,6 +60,18 @@ pub struct DiffDetail {
     pub samples: SamplePage,
 }
 
+impl DiffDetail {
+    // offset 0 with no diff means the path never diffs — a 404. A later page
+    // coming back empty is just past-the-end pagination, not a missing path.
+    pub fn is_empty_at_first_page(&self) -> bool {
+        self.raw_count == 0
+            && self.noise_count == 0
+            && self.samples.items.is_empty()
+            && !self.samples.has_more
+            && self.samples.offset == 0
+    }
+}
+
 impl DiffEngine {
     pub fn new(suppress: SuppressRules, classifiers: EndpointClassifiers) -> Self {
         Self {

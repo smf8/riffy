@@ -67,8 +67,8 @@ Every use of `.unwrap()` or `.expect()` in non-test code requires an explicit co
 - Evaluate every `.clone()`: if the type is on a hot path, assess whether it is costly and consider `Arc<T>` instead.
 
 ### Lints
-- All code is compiled with `-D warnings` and `-D clippy::all`. Zero warnings are allowed.
-- The single exception is `dead_code`: it is allowed globally via `-A dead_code` in `make lint` (R28). Never add per-item `#[allow(dead_code)]` attributes.
+- All code is compiled with `-D warnings` and `-D clippy::all`. Zero warnings are allowed — there are **no exceptions**, including `dead_code` (R28).
+- Dead code must be **deleted, not suppressed**: never silence it with `#[allow(dead_code)]`. Note the compiler's `dead_code` lint cannot see unused `pub` items in the lib crate (it treats them as public API), so removing a feature means hunting down its now-unused `pub` functions, enum variants, and dependencies by hand.
 - Run `make format` before `make lint`.
 
 ---

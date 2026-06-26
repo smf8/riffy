@@ -19,7 +19,7 @@ style-check:
 
 lint: style-check
 	@rustup component add clippy 2> /dev/null
-	cargo clippy --all --tests --examples -- -D clippy::all -D warnings -A dead_code
+	cargo clippy --all --tests --examples -- -D clippy::all -D warnings
 
 format:
 	@rustup component add rustfmt 2> /dev/null

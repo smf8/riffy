@@ -51,11 +51,7 @@ impl UpstreamClient {
     ) -> Result<UpstreamResponse, UpstreamError> {
         tracing::Span::current().record("target", target);
 
-        let url = if target.contains("://") {
-            format!("{target}{path}")
-        } else {
-            format!("http://{target}{path}")
-        };
+        let url = format!("{}{path}", super::normalize_base(target));
 
         let mut builder = self.client.request(method.clone(), &url);
 
@@ -99,9 +95,5 @@ impl UpstreamClient {
             headers: resp_headers,
             body,
         })
-    }
-
-    pub fn targets(&self) -> [&str; 3] {
-        [&self.baseline, &self.candidate, &self.control]
     }
 }

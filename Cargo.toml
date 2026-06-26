@@ -9,8 +9,6 @@ tokio = { version = "1", features = ["full"] }
 
 # HTTP framework
 axum = "0.7"
-tower = "0.5"
-tower-http = { version = "0.5", features = ["trace", "timeout"] }
 
 # Endpoint path-template matching (radix tree; the same router axum uses
 # internally, sharing the already-linked 0.7 build). `:param` segment syntax.
@@ -43,7 +41,6 @@ garde = { version = "0.22", features = ["derive"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 # Concurrency
-dashmap = "6"
 rand = "0.9"
 # Lock-free atomic swap for runtime-writable suppression rules (read side only).
 arc-swap = "1"
