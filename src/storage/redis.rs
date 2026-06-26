@@ -1,11 +1,12 @@
-use std::time::Duration;
-
 use super::error::StoreError;
 use super::{RawSample, SampleStore, SAMPLE_KEY_PREFIX};
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use redis::aio::ConnectionManager;
 use redis::streams::{StreamId, StreamMaxlen, StreamRangeReply};
 use redis::{from_redis_value, AsyncCommands, Value};
+use std::collections::HashMap;
+use std::time::Duration;
 
 // Tracks endpoints that have a stream, so `list_endpoints` avoids a keyspace scan.
 const ENDPOINTS_INDEX: &str = "riffy:samples:__endpoints__";
@@ -45,14 +46,17 @@ impl SampleStore for RedisSampleStore {
         let mut fields: Vec<(&str, String)> = vec![
             ("timestamp", sample.timestamp.to_rfc3339()),
             ("baseline_status", sample.baseline_status.to_string()),
-            ("baseline_body", sample.baseline_body.clone()),
+            (
+                "baseline_body",
+                String::from_utf8_lossy(&sample.baseline_body).to_string(),
+            ),
             ("baseline_headers", sample.baseline_headers.clone()),
         ];
         if let Some(status) = sample.candidate_status {
             fields.push(("candidate_status", status.to_string()));
         }
         if let Some(body) = &sample.candidate_body {
-            fields.push(("candidate_body", body.clone()));
+            fields.push(("candidate_body", String::from_utf8_lossy(body).to_string()));
         }
         if let Some(headers) = &sample.candidate_headers {
             fields.push(("candidate_headers", headers.clone()));
@@ -61,7 +65,7 @@ impl SampleStore for RedisSampleStore {
             fields.push(("control_status", status.to_string()));
         }
         if let Some(body) = &sample.control_body {
-            fields.push(("control_body", body.clone()));
+            fields.push(("control_body", String::from_utf8_lossy(body).to_string()));
         }
         if let Some(headers) = &sample.control_headers {
             fields.push(("control_headers", headers.clone()));
@@ -169,13 +173,13 @@ fn sample_from_entry(entry: &StreamId, endpoint: &str) -> Result<RawSample, Stor
         endpoint: endpoint.to_owned(),
         timestamp,
         baseline_status,
-        baseline_body,
+        baseline_body: Bytes::from(baseline_body),
         baseline_headers,
         candidate_status: parse_status(&entry.map, "candidate_status", &entry.id)?,
-        candidate_body: stream_field(&entry.map, "candidate_body")?,
+        candidate_body: stream_field(&entry.map, "candidate_body")?.map(Bytes::from),
         candidate_headers: stream_field(&entry.map, "candidate_headers")?,
         control_status: parse_status(&entry.map, "control_status", &entry.id)?,
-        control_body: stream_field(&entry.map, "control_body")?,
+        control_body: stream_field(&entry.map, "control_body")?.map(Bytes::from),
         control_headers: stream_field(&entry.map, "control_headers")?,
         request_curl: stream_field(&entry.map, "request_curl")?,
     })
@@ -194,10 +198,7 @@ fn parse_status(
     }
 }
 
-fn stream_field(
-    map: &std::collections::HashMap<String, Value>,
-    name: &str,
-) -> Result<Option<String>, StoreError> {
+fn stream_field(map: &HashMap<String, Value>, name: &str) -> Result<Option<String>, StoreError> {
     match map.get(name) {
         Some(value) => Ok(Some(from_redis_value(value).map_err(StoreError::Redis)?)),
         None => Ok(None),

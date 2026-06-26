@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 
 pub mod error;
@@ -20,13 +21,13 @@ pub struct RawSample {
     pub endpoint: String,
     pub timestamp: DateTime<Utc>,
     pub baseline_status: u16,
-    pub baseline_body: String,
+    pub baseline_body: Bytes,
     pub baseline_headers: String,
     pub candidate_status: Option<u16>,
-    pub candidate_body: Option<String>,
+    pub candidate_body: Option<Bytes>,
     pub candidate_headers: Option<String>,
     pub control_status: Option<u16>,
-    pub control_body: Option<String>,
+    pub control_body: Option<Bytes>,
     pub control_headers: Option<String>,
     pub request_curl: Option<String>,
 }

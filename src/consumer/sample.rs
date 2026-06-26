@@ -5,6 +5,7 @@ use crate::upstream::body::decode_compressed_body;
 use crate::upstream::client::UpstreamResponse;
 use crate::upstream::header::headers_to_json;
 use axum::http::HeaderMap;
+use bytes::Bytes;
 use chrono::Utc;
 
 pub(super) async fn assemble(
@@ -57,13 +58,13 @@ pub(super) async fn assemble(
     })
 }
 
-struct Secondary {
+struct SampledResponse {
     status: Option<u16>,
-    body: Option<String>,
+    body: Option<Bytes>,
     headers: Option<String>,
 }
 
-impl Secondary {
+impl SampledResponse {
     fn failed() -> Self {
         Self {
             status: None,
@@ -89,15 +90,15 @@ async fn secondary(
     response: &Option<UpstreamResponse>,
     baseline_status: u16,
     max_body_bytes: usize,
-) -> Option<Secondary> {
+) -> Option<SampledResponse> {
     let Some(response) = response else {
-        return Some(Secondary::failed());
+        return Some(SampledResponse::failed());
     };
     if response.status != baseline_status {
-        return Some(Secondary::status_only(response.status));
+        return Some(SampledResponse::status_only(response.status));
     }
     match storable_json(response, max_body_bytes).await {
-        Some(body) => Some(Secondary {
+        Some(body) => Some(SampledResponse {
             status: Some(response.status),
             body: Some(body),
             headers: Some(headers_text(&response.headers)),
@@ -113,7 +114,7 @@ async fn secondary(
     }
 }
 
-async fn storable_json(response: &UpstreamResponse, max_body_bytes: usize) -> Option<String> {
+async fn storable_json(response: &UpstreamResponse, max_body_bytes: usize) -> Option<Bytes> {
     let decoded = decode_compressed_body(response).await?;
     if decoded.len() > max_body_bytes {
         tracing::debug!(
@@ -127,7 +128,8 @@ async fn storable_json(response: &UpstreamResponse, max_body_bytes: usize) -> Op
         tracing::debug!("skipping non-json body");
         return None;
     }
-    String::from_utf8(decoded.into_owned()).ok()
+
+    Some(decoded)
 }
 
 fn headers_text(headers: &HeaderMap) -> String {

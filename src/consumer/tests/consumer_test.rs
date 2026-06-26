@@ -93,9 +93,15 @@ async fn stores_sample_with_both_bodies_for_matching_status() {
     assert_eq!(s.baseline_status, 200);
     assert_eq!(s.baseline_body, r#"{"name": "alice"}"#);
     assert_eq!(s.candidate_status, Some(200));
-    assert_eq!(s.candidate_body.as_deref(), Some(r#"{"name": "bob"}"#));
+    assert_eq!(
+        s.candidate_body,
+        Some(Bytes::from_static(br#"{"name": "bob"}"#))
+    );
     assert_eq!(s.control_status, Some(200));
-    assert_eq!(s.control_body.as_deref(), Some(r#"{"name": "alice"}"#));
+    assert_eq!(
+        s.control_body,
+        Some(Bytes::from_static(br#"{"name": "alice"}"#))
+    );
 }
 
 #[tokio::test]
@@ -152,7 +158,10 @@ async fn missing_candidate_stored_as_none() {
     assert_eq!(samples.len(), 1);
     assert_eq!(samples[0].candidate_status, None);
     assert_eq!(samples[0].candidate_body, None);
-    assert_eq!(samples[0].control_body.as_deref(), Some(r#"{"a": 2}"#));
+    assert_eq!(
+        samples[0].control_body,
+        Some(Bytes::from_static(br#"{"a": 2}"#))
+    );
 }
 
 #[tokio::test]

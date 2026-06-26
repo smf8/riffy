@@ -1,13 +1,12 @@
-use std::borrow::Cow;
-
 use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
+use bytes::Bytes;
 use tokio::io::AsyncReadExt;
 
 use super::client::UpstreamResponse;
 
-pub async fn decode_compressed_body(response: &UpstreamResponse) -> Option<Cow<'_, [u8]>> {
+pub async fn decode_compressed_body(response: &UpstreamResponse) -> Option<Bytes> {
     let Some(value) = response.headers.get(axum::http::header::CONTENT_ENCODING) else {
-        return Some(Cow::Borrowed(response.body.as_ref()));
+        return Some(response.body.clone());
     };
 
     let Ok(encoding) = value.to_str() else {
@@ -18,7 +17,7 @@ pub async fn decode_compressed_body(response: &UpstreamResponse) -> Option<Cow<'
 
     let compressed = response.body.as_ref();
     let result = match encoding.as_str() {
-        "" | "identity" => return Some(Cow::Borrowed(compressed)),
+        "" | "identity" => return Some(response.body.clone()),
         "gzip" | "x-gzip" => read_all(GzipDecoder::new(compressed)).await,
         "deflate" => read_all(ZlibDecoder::new(compressed)).await,
         "br" => read_all(BrotliDecoder::new(compressed)).await,
@@ -30,7 +29,7 @@ pub async fn decode_compressed_body(response: &UpstreamResponse) -> Option<Cow<'
     };
 
     match result {
-        Ok(bytes) => Some(Cow::Owned(bytes)),
+        Ok(bytes) => Some(Bytes::from(bytes)),
         Err(e) => {
             tracing::warn!(error = %e, encoding = %encoding, "failed to decompress body, skipping");
             None

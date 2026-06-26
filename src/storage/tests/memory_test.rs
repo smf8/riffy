@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::storage::{InMemorySampleStore, RawSample, SampleStore};
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 
 fn sample_at(endpoint: &str, tag: &str, timestamp: DateTime<Utc>) -> RawSample {
@@ -9,13 +10,13 @@ fn sample_at(endpoint: &str, tag: &str, timestamp: DateTime<Utc>) -> RawSample {
         endpoint: endpoint.to_owned(),
         timestamp,
         baseline_status: 200,
-        baseline_body: format!(r#"{{"v":"{tag}"}}"#),
+        baseline_body: Bytes::from(format!(r#"{{"v":"{tag}"}}"#)),
         baseline_headers: r#"{"content-type":"application/json"}"#.to_owned(),
         candidate_status: Some(200),
-        candidate_body: Some(format!(r#"{{"v":"{tag}-c"}}"#)),
+        candidate_body: Some(Bytes::from(format!(r#"{{"v":"{tag}-c"}}"#))),
         candidate_headers: Some(r#"{"content-type":"application/json"}"#.to_owned()),
         control_status: Some(200),
-        control_body: Some(format!(r#"{{"v":"{tag}"}}"#)),
+        control_body: Some(Bytes::from(format!(r#"{{"v":"{tag}"}}"#))),
         control_headers: Some(r#"{"content-type":"application/json"}"#.to_owned()),
         request_curl: None,
     }
@@ -39,7 +40,10 @@ async fn round_trip_newest_first() {
     assert_eq!(got.len(), 3);
     assert_eq!(got[0].baseline_body, r#"{"v":"s2"}"#);
     assert_eq!(got[2].baseline_body, r#"{"v":"s0"}"#);
-    assert_eq!(got[0].candidate_body.as_deref(), Some(r#"{"v":"s2-c"}"#));
+    assert_eq!(
+        got[0].candidate_body,
+        Some(Bytes::from_static(br#"{"v":"s2-c"}"#))
+    );
 }
 
 #[tokio::test]

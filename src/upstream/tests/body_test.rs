@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use crate::upstream::body::decode_compressed_body;
 use crate::upstream::client::UpstreamResponse;
 use async_compression::tokio::bufread::{BrotliEncoder, GzipEncoder, ZlibEncoder, ZstdEncoder};
@@ -31,16 +29,18 @@ async fn read_all<R: tokio::io::AsyncRead + Unpin>(mut reader: R) -> Vec<u8> {
 #[tokio::test]
 async fn absent_encoding_returns_borrowed_body() {
     let resp = response(None, BODY.to_vec());
+    let ptr = resp.body.as_ptr();
     let decoded = decode_compressed_body(&resp).await.unwrap();
-    assert!(matches!(decoded, Cow::Borrowed(_)));
+    assert_eq!(decoded.as_ptr(), ptr);
     assert_eq!(&*decoded, BODY);
 }
 
 #[tokio::test]
 async fn identity_encoding_returns_borrowed_body() {
     let resp = response(Some("identity"), BODY.to_vec());
+    let ptr = resp.body.as_ptr();
     let decoded = decode_compressed_body(&resp).await.unwrap();
-    assert!(matches!(decoded, Cow::Borrowed(_)));
+    assert_eq!(decoded.as_ptr(), ptr);
     assert_eq!(&*decoded, BODY);
 }
 

@@ -3,6 +3,7 @@ use crate::analysis::engine::DiffEngine;
 use crate::analysis::suppress::SuppressRules;
 use crate::compare::flatten::{DiffType, STATUS_FIELD};
 use crate::storage::RawSample;
+use bytes::Bytes;
 use chrono::Utc;
 
 const EP: &str = "/x";
@@ -24,13 +25,13 @@ fn sample(baseline: &str, candidate: Option<&str>, control: Option<&str>) -> Raw
         endpoint: EP.to_owned(),
         timestamp: Utc::now(),
         baseline_status: 200,
-        baseline_body: baseline.to_owned(),
+        baseline_body: Bytes::from(baseline.to_owned()),
         baseline_headers: "{}".to_owned(),
         candidate_status: candidate.map(|_| 200),
-        candidate_body: candidate.map(|b| b.to_owned()),
+        candidate_body: candidate.map(|b| Bytes::from(b.to_owned())),
         candidate_headers: candidate.map(|_| "{}".to_owned()),
         control_status: control.map(|_| 200),
-        control_body: control.map(|b| b.to_owned()),
+        control_body: control.map(|b| Bytes::from(b.to_owned())),
         control_headers: control.map(|_| "{}".to_owned()),
         request_curl: None,
     }
@@ -46,13 +47,13 @@ fn sample_with_headers(
         endpoint: EP.to_owned(),
         timestamp: Utc::now(),
         baseline_status: 200,
-        baseline_body: baseline.0.to_owned(),
+        baseline_body: Bytes::from(baseline.0.to_owned()),
         baseline_headers: baseline.1.to_owned(),
         candidate_status: Some(200),
-        candidate_body: Some(candidate.0.to_owned()),
+        candidate_body: Some(Bytes::from(candidate.0.to_owned())),
         candidate_headers: Some(candidate.1.to_owned()),
         control_status: Some(200),
-        control_body: Some(control.0.to_owned()),
+        control_body: Some(Bytes::from(control.0.to_owned())),
         control_headers: Some(control.1.to_owned()),
         request_curl: None,
     }

@@ -6,6 +6,7 @@ use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use chrono::Utc;
 use riffy::analysis::classify::EndpointClassifiers;
 use riffy::analysis::engine::DiffEngine;
@@ -26,13 +27,13 @@ fn raw(
         endpoint: endpoint.to_owned(),
         timestamp: Utc::now(),
         baseline_status: 200,
-        baseline_body: baseline.to_owned(),
+        baseline_body: Bytes::from(baseline.to_owned()),
         baseline_headers: "{}".to_owned(),
         candidate_status: candidate.map(|_| 200),
-        candidate_body: candidate.map(|b| b.to_owned()),
+        candidate_body: candidate.map(|b| Bytes::from(b.to_owned())),
         candidate_headers: candidate.map(|_| "{}".to_owned()),
         control_status: control.map(|_| 200),
-        control_body: control.map(|b| b.to_owned()),
+        control_body: control.map(|b| Bytes::from(b.to_owned())),
         control_headers: control.map(|_| "{}".to_owned()),
         request_curl: None,
     }

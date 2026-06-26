@@ -216,17 +216,17 @@ fn sample_view(sample: &RawSample) -> Value {
         "request_curl": sample.request_curl,
         "baseline": UpstreamResponseView::new(
             Some(sample.baseline_status),
-            Some(&sample.baseline_body),
+            Some(str::from_utf8(sample.baseline_body.as_ref()).unwrap_or_default()),
             Some(&sample.baseline_headers),
         ),
         "candidate": UpstreamResponseView::new(
             sample.candidate_status,
-            sample.candidate_body.as_deref(),
+            sample.candidate_body.as_ref().and_then(|c| str::from_utf8(c.as_ref()).ok()),
             sample.candidate_headers.as_deref(),
         ),
         "control": UpstreamResponseView::new(
             sample.control_status,
-            sample.control_body.as_deref(),
+            sample.control_body.as_ref().and_then(|c| str::from_utf8(c.as_ref()).ok()),
             sample.control_headers.as_deref(),
         ),
     })

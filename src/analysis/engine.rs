@@ -221,8 +221,8 @@ struct Baseline<'a> {
 
 struct Other<'a> {
     status: Option<u16>,
-    body: Option<&'a str>,
-    headers: Option<&'a str>,
+    body: Option<&'a Value>,
+    headers: Option<&'a Value>,
 }
 
 fn diff_sample(
@@ -231,7 +231,7 @@ fn diff_sample(
     rules: &SuppressRules,
     extra: &SuppressRules,
 ) -> (HashMap<String, FieldDiff>, HashMap<String, FieldDiff>) {
-    let baseline_body: Value = match serde_json::from_str(&sample.baseline_body) {
+    let baseline_body: Value = match serde_json::from_slice(&sample.baseline_body) {
         Ok(v) => v,
         // Bodies are JSON-validated at write time; degrade a corrupt read to "no diffs".
         Err(_) => return (HashMap::new(), HashMap::new()),
@@ -250,8 +250,16 @@ fn diff_sample(
         &baseline,
         &Other {
             status: sample.candidate_status,
-            body: sample.candidate_body.as_deref(),
-            headers: sample.candidate_headers.as_deref(),
+            body: sample
+                .candidate_body
+                .as_ref()
+                .and_then(|c| serde_json::from_slice::<Value>(c).ok())
+                .as_ref(),
+            headers: sample
+                .candidate_headers
+                .as_ref()
+                .and_then(|h| serde_json::from_str(h).ok())
+                .as_ref(),
         },
         rules,
         extra,
@@ -261,8 +269,16 @@ fn diff_sample(
         &baseline,
         &Other {
             status: sample.control_status,
-            body: sample.control_body.as_deref(),
-            headers: sample.control_headers.as_deref(),
+            body: sample
+                .control_body
+                .as_ref()
+                .and_then(|c| serde_json::from_slice::<Value>(c).ok())
+                .as_ref(),
+            headers: sample
+                .control_headers
+                .as_ref()
+                .and_then(|h| serde_json::from_str(h).ok())
+                .as_ref(),
         },
         rules,
         extra,
@@ -280,12 +296,12 @@ fn diff_one(
     let mut diffs = match other.status {
         None => HashMap::new(),
         Some(status) if status == baseline.status => {
-            let mut diffs = match other.body.and_then(parse_json) {
-                Some(other_body) => flatten_value(baseline.body, &other_body),
+            let mut diffs = match other.body {
+                Some(other_body) => flatten_value(baseline.body, other_body),
                 None => HashMap::new(),
             };
-            if let Some(other_headers) = other.headers.and_then(parse_json) {
-                for (path, diff) in flatten_value(baseline.headers, &other_headers) {
+            if let Some(other_headers) = other.headers {
+                for (path, diff) in flatten_value(baseline.headers, other_headers) {
                     diffs.insert(format!("{HEADER_FIELD_PREFIX}.{path}"), diff);
                 }
             }
@@ -309,8 +325,4 @@ fn diff_one(
         !rules.is_suppressed(endpoint, path) && !extra.is_suppressed(endpoint, path)
     });
     diffs
-}
-
-fn parse_json(text: &str) -> Option<Value> {
-    serde_json::from_str(text).ok()
 }
